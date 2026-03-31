@@ -2529,7 +2529,7 @@ def _setup_signal():
     print_info("  Testing connection...")
     try:
         import httpx
-        resp = httpx.get(f"{url.rstrip('/')}/api/v1/check", timeout=10.0)
+        resp = httpx.get(f"{url.rstrip('/')}/v1/about", timeout=10.0)
         if resp.status_code == 200:
             print_success("  signal-cli daemon is reachable!")
         else:

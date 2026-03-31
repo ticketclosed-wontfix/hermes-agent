@@ -72,7 +72,7 @@ Keep this running in the background. You can use `systemd`, `tmux`, `screen`, or
 Verify it's running:
 
 ```bash
-curl http://127.0.0.1:8080/api/v1/check
+curl http://127.0.0.1:8080/v1/about
 # Should return: {"versions":{"signal-cli":...}}
 ```
 
