@@ -67,12 +67,18 @@ def _skin_branding(key: str, fallback: str) -> str:
 
 from hermes_cli import __version__ as VERSION, __release_date__ as RELEASE_DATE
 
-HERMES_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
-[bold #FFD700]██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
-[#FFBF00]███████║█████╗  ██████╔╝██╔████╔██║█████╗  ███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/]
-[#FFBF00]██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/]
-[#CD7F32]██║  ██║███████╗██║  ██║██║ ╚═╝ ██║███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
-[#CD7F32]╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]"""
+HERMES_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗[/]
+[bold #FFD700]██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝[/]
+[#FFBF00]███████║█████╗  ██████╔╝██╔████╔██║█████╗  ███████╗[/]
+[#FFBF00]██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ╚════██║[/]
+[#CD7F32]██║  ██║███████╗██║  ██║██║ ╚═╝ ██║███████╗███████║[/]
+[#CD7F32]╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝[/]
+[bold #FFD700]       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
+[bold #FFD700]      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
+[#FFBF00]      ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/]
+[#FFBF00]      ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/]
+[#CD7F32]      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
+[#CD7F32]      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]"""
 
 HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀⠀⢀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [#CD7F32]⠀⠀⠀⠀⠀⠀⢀⣠⣴⣾⣿⣿⣇⠸⣿⣿⠇⣸⣿⣿⣷⣦⣄⡀⠀⠀⠀⠀⠀⠀[/]
@@ -311,107 +317,18 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
         left_lines.append(f"[dim {session_color}]Session: {session_id}[/]")
     left_content = "\n".join(left_lines)
 
-    right_lines = [f"[bold {accent}]Available Tools[/]"]
-    toolsets_dict: Dict[str, list] = {}
-
-    for tool in tools:
-        tool_name = tool["function"]["name"]
-        toolset = _display_toolset_name(get_toolset_for_tool(tool_name) or "other")
-        toolsets_dict.setdefault(toolset, []).append(tool_name)
-
-    for item in unavailable_toolsets:
-        toolset_id = item.get("id", item.get("name", "unknown"))
-        display_name = _display_toolset_name(toolset_id)
-        if display_name not in toolsets_dict:
-            toolsets_dict[display_name] = []
-        for tool_name in item.get("tools", []):
-            if tool_name not in toolsets_dict[display_name]:
-                toolsets_dict[display_name].append(tool_name)
-
-    sorted_toolsets = sorted(toolsets_dict.keys())
-    display_toolsets = sorted_toolsets[:8]
-    remaining_toolsets = len(sorted_toolsets) - 8
-
-    for toolset in display_toolsets:
-        tool_names = toolsets_dict[toolset]
-        colored_names = []
-        for name in sorted(tool_names):
-            if name in disabled_tools:
-                colored_names.append(f"[red]{name}[/]")
-            elif name in lazy_tools:
-                colored_names.append(f"[yellow]{name}[/]")
-            else:
-                colored_names.append(f"[{text}]{name}[/]")
-
-        tools_str = ", ".join(colored_names)
-        if len(", ".join(sorted(tool_names))) > 45:
-            short_names = []
-            length = 0
-            for name in sorted(tool_names):
-                if length + len(name) + 2 > 42:
-                    short_names.append("...")
-                    break
-                short_names.append(name)
-                length += len(name) + 2
-            colored_names = []
-            for name in short_names:
-                if name == "...":
-                    colored_names.append("[dim]...[/]")
-                elif name in disabled_tools:
-                    colored_names.append(f"[red]{name}[/]")
-                elif name in lazy_tools:
-                    colored_names.append(f"[yellow]{name}[/]")
-                else:
-                    colored_names.append(f"[{text}]{name}[/]")
-            tools_str = ", ".join(colored_names)
-
-        right_lines.append(f"[dim {dim}]{toolset}:[/] {tools_str}")
-
-    if remaining_toolsets > 0:
-        right_lines.append(f"[dim {dim}](and {remaining_toolsets} more toolsets...)[/]")
-
-    # MCP Servers section (only if configured)
+    # MCP server count (for summary line)
     try:
         from tools.mcp_tool import get_mcp_status
         mcp_status = get_mcp_status()
     except Exception:
         mcp_status = []
 
-    if mcp_status:
-        right_lines.append("")
-        right_lines.append(f"[bold {accent}]MCP Servers[/]")
-        for srv in mcp_status:
-            if srv["connected"]:
-                right_lines.append(
-                    f"[dim {dim}]{srv['name']}[/] [{text}]({srv['transport']})[/] "
-                    f"[dim {dim}]—[/] [{text}]{srv['tools']} tool(s)[/]"
-                )
-            else:
-                right_lines.append(
-                    f"[red]{srv['name']}[/] [dim]({srv['transport']})[/] "
-                    f"[red]— failed[/]"
-                )
-
-    right_lines.append("")
-    right_lines.append(f"[bold {accent}]Available Skills[/]")
+    # Skill count (for summary line)
     skills_by_category = get_available_skills()
     total_skills = sum(len(s) for s in skills_by_category.values())
 
-    if skills_by_category:
-        for category in sorted(skills_by_category.keys()):
-            skill_names = sorted(skills_by_category[category])
-            if len(skill_names) > 8:
-                display_names = skill_names[:8]
-                skills_str = ", ".join(display_names) + f" +{len(skill_names) - 8} more"
-            else:
-                skills_str = ", ".join(skill_names)
-            if len(skills_str) > 50:
-                skills_str = skills_str[:47] + "..."
-            right_lines.append(f"[dim {dim}]{category}:[/] [{text}]{skills_str}[/]")
-    else:
-        right_lines.append(f"[dim {dim}]No skills installed[/]")
-
-    right_lines.append("")
+    right_lines = []
     mcp_connected = sum(1 for s in mcp_status if s["connected"]) if mcp_status else 0
     summary_parts = [f"{len(tools)} tools", f"{total_skills} skills"]
     if mcp_connected:
@@ -456,7 +373,7 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
 
     console.print()
     term_width = shutil.get_terminal_size().columns
-    if term_width >= 95:
+    if term_width >= 58:
         _logo = _bskin.banner_logo if _bskin and hasattr(_bskin, 'banner_logo') and _bskin.banner_logo else HERMES_AGENT_LOGO
         console.print(_logo)
         console.print()
