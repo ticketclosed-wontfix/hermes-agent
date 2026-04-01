@@ -340,6 +340,56 @@ def _dequeue_pending_text(adapter, session_key: str) -> str | None:
     return text
 
 
+def _resolve_runtime_with_fallback(fallback_model) -> dict:
+    """Try primary provider, then fallback chain if primary auth fails.
+
+    Returns runtime kwargs dict.  Raises RuntimeError only when ALL
+    providers (primary + entire fallback chain) are exhausted.
+    """
+    try:
+        runtime = _resolve_runtime_agent_kwargs()
+        if runtime.get("api_key"):
+            return runtime
+    except Exception:
+        pass
+
+    # Primary failed — walk the fallback chain
+    fb_list = fallback_model if isinstance(fallback_model, list) else (
+        [fallback_model] if isinstance(fallback_model, dict) and fallback_model.get("provider") else []
+    )
+    for fb in fb_list:
+        if not fb or not fb.get("provider") or not fb.get("model"):
+            continue
+        try:
+            from agent.auxiliary_client import resolve_provider_client
+            fb_client, _ = resolve_provider_client(fb["provider"], model=fb["model"])
+            if fb_client and getattr(fb_client, "api_key", None):
+                fb_provider = fb["provider"]
+                if fb_provider == "anthropic":
+                    api_mode = "anthropic_messages"
+                elif fb_provider == "openai-codex":
+                    api_mode = "codex_responses"
+                else:
+                    api_mode = "chat_completions"
+                logger.warning(
+                    "Primary provider auth failed — falling back to %s (%s)",
+                    fb["model"], fb_provider,
+                )
+                return {
+                    "api_key": fb_client.api_key,
+                    "base_url": str(fb_client.base_url),
+                    "provider": fb_provider,
+                    "api_mode": api_mode,
+                    "command": None,
+                    "args": [],
+                    "credential_pool": None,
+                }
+        except Exception:
+            continue
+
+    raise RuntimeError("No provider credentials available (primary and all fallbacks failed)")
+
+
 def _check_unavailable_skill(command_name: str) -> str | None:
     """Check if a command matches a known-but-inactive skill.
 
@@ -3959,11 +4009,12 @@ class GatewayRunner:
         _thread_metadata = {"thread_id": source.thread_id} if source.thread_id else None
 
         try:
-            runtime_kwargs = _resolve_runtime_agent_kwargs()
-            if not runtime_kwargs.get("api_key"):
+            try:
+                runtime_kwargs = _resolve_runtime_with_fallback(self._fallback_model)
+            except Exception as _fb_exc:
                 await adapter.send(
                     source.chat_id,
-                    f"❌ Background task {task_id} failed: no provider credentials configured.",
+                    f"❌ Background task {task_id} failed: {_fb_exc}",
                     metadata=_thread_metadata,
                 )
                 return
@@ -4125,11 +4176,12 @@ class GatewayRunner:
         _thread_meta = {"thread_id": source.thread_id} if source.thread_id else None
 
         try:
-            runtime_kwargs = _resolve_runtime_agent_kwargs()
-            if not runtime_kwargs.get("api_key"):
+            try:
+                runtime_kwargs = _resolve_runtime_with_fallback(self._fallback_model)
+            except Exception as _fb_exc:
                 await adapter.send(
                     source.chat_id,
-                    "❌ /btw failed: no provider credentials configured.",
+                    f"❌ /btw failed: {_fb_exc}",
                     metadata=_thread_meta,
                 )
                 return
@@ -4401,8 +4453,9 @@ class GatewayRunner:
             from run_agent import AIAgent
             from agent.model_metadata import estimate_messages_tokens_rough
 
-            runtime_kwargs = _resolve_runtime_agent_kwargs()
-            if not runtime_kwargs.get("api_key"):
+            try:
+                runtime_kwargs = _resolve_runtime_with_fallback(self._fallback_model)
+            except Exception:
                 return "No provider configured -- cannot compress."
 
             # Resolve model from config (same reason as memory flush above).
@@ -5658,10 +5711,10 @@ class GatewayRunner:
             model = _resolve_gateway_model(user_config)
 
             try:
-                runtime_kwargs = _resolve_runtime_agent_kwargs()
+                runtime_kwargs = _resolve_runtime_with_fallback(self._fallback_model)
             except Exception as exc:
                 return {
-                    "final_response": f"⚠️ Provider authentication failed: {exc}",
+                    "final_response": f"⚠️ Provider authentication failed (all providers exhausted): {exc}",
                     "messages": [],
                     "api_calls": 0,
                     "tools": [],

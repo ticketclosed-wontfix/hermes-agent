@@ -7355,6 +7355,12 @@ class AIAgent:
                         print(f"{self.log_prefix}     • For Claude Code: run 'claude /login' to refresh, then retry")
                         print(f"{self.log_prefix}     • Clear stale keys: hermes config set ANTHROPIC_TOKEN \"\"")
                         print(f"{self.log_prefix}     • Legacy cleanup: hermes config set ANTHROPIC_API_KEY \"\"")
+                        # Auth is dead — try fallback immediately instead of
+                        # burning retries against a permanently invalid token.
+                        if self._try_activate_fallback():
+                            self._emit_status(f"⚠️ Anthropic auth failed — switched to fallback provider")
+                            retry_count = 0
+                            continue
 
                     retry_count += 1
                     elapsed_time = time.time() - api_start_time

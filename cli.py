@@ -2150,7 +2150,39 @@ class HermesCLI:
             return True
 
         if not self._ensure_runtime_credentials():
-            return False
+            # Primary provider auth failed — try fallback chain before giving up.
+            activated = False
+            fb_list = self._fallback_model if isinstance(self._fallback_model, list) else (
+                [self._fallback_model] if isinstance(self._fallback_model, dict) and self._fallback_model.get("provider") else []
+            )
+            for i, fb in enumerate(fb_list):
+                if not fb or not fb.get("provider") or not fb.get("model"):
+                    continue
+                try:
+                    from agent.auxiliary_client import resolve_provider_client
+                    fb_client, _ = resolve_provider_client(fb["provider"], model=fb["model"])
+                    if fb_client and getattr(fb_client, "api_key", None):
+                        self.api_key = fb_client.api_key
+                        self.base_url = str(fb_client.base_url)
+                        self.provider = fb["provider"]
+                        self.model = fb["model"]
+                        # Determine api_mode from provider
+                        if fb["provider"] == "anthropic":
+                            self.api_mode = "anthropic_messages"
+                        elif fb["provider"] in ("openai-codex",):
+                            self.api_mode = "codex_responses"
+                        else:
+                            self.api_mode = "chat_completions"
+                        # Remove activated entry from fallback chain
+                        remaining = fb_list[i + 1:]
+                        self._fallback_model = remaining
+                        activated = True
+                        _cprint(f"\033[1;33m⚠️  Primary provider auth failed — falling back to {fb['model']} ({fb['provider']})\033[0m")
+                        break
+                except Exception:
+                    continue
+            if not activated:
+                return False
 
         # Initialize SQLite session store for CLI sessions (if not already done in __init__)
         if self._session_db is None:
