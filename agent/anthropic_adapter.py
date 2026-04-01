@@ -446,6 +446,13 @@ def _resolve_claude_code_token_from_credentials(creds: Optional[Dict[str, Any]] 
         refreshed = _refresh_oauth_token(creds)
         if refreshed:
             return refreshed
+        # Another process (e.g. Claude Code) may have refreshed the token
+        # while our refresh failed due to the single-use rotation.  Re-read
+        # the credentials file to pick up the winner's valid token.
+        fresh_creds = read_claude_code_credentials()
+        if fresh_creds and is_claude_code_token_valid(fresh_creds):
+            logger.debug("Another process refreshed the token — using updated credentials")
+            return fresh_creds["accessToken"]
         logger.debug("Token refresh failed — re-run 'claude setup-token' to reauthenticate")
     return None
 
@@ -785,6 +792,17 @@ def refresh_hermes_oauth_token() -> Optional[str]:
         return refreshed["access_token"]
     except Exception as e:
         logger.debug("Failed to refresh Hermes OAuth token: %s", e)
+
+    # Another process may have refreshed while ours failed (single-use
+    # rotation race).  Check both credential stores for a valid token.
+    fresh_creds = read_claude_code_credentials()
+    if fresh_creds and is_claude_code_token_valid(fresh_creds):
+        logger.debug("Another process refreshed the token — using updated credentials from Claude Code store")
+        return fresh_creds["accessToken"]
+    fresh_hermes = read_hermes_oauth_credentials()
+    if fresh_hermes and is_claude_code_token_valid(fresh_hermes):
+        logger.debug("Another process refreshed the token — using updated credentials from Hermes store")
+        return fresh_hermes["accessToken"]
 
     return None
 
