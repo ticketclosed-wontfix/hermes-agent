@@ -5201,6 +5201,15 @@ class HermesCLI:
         except Exception:
             logger.debug("Edit diff preview failed for %s", function_name, exc_info=True)
 
+        # Inline file content preview for read_file
+        if function_name == "read_file":
+            try:
+                from agent.display import render_read_file_inline
+
+                render_read_file_inline(function_result, print_fn=_cprint)
+            except Exception:
+                logger.debug("Read file inline preview failed", exc_info=True)
+
     # ====================================================================
     # Voice mode methods
     # ====================================================================

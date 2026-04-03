@@ -1082,3 +1082,67 @@ def format_context_pressure_gateway(
         hint = "Auto-compaction is disabled — context may be truncated."
 
     return f"{icon} Context: {bar} {pct_int}% to compaction\n{hint}"
+
+
+# =========================================================================
+# Inline read_file preview (show file content in CLI transcript)
+# =========================================================================
+
+_ANSI_LINE_NUM = "\033[38;2;100;100;120m"
+_MAX_INLINE_READ_LINES = 60
+
+
+def render_read_file_inline(
+    function_result: str,
+    *,
+    print_fn=None,
+    max_lines: int = _MAX_INLINE_READ_LINES,
+) -> bool:
+    """Render read_file content inline in the CLI transcript.
+
+    Parses the JSON tool result from read_file and emits the file content
+    with dimmed line numbers, similar to how inline diffs are rendered for
+    write_file/patch.  Returns True if content was emitted.
+
+    When the file exceeds *max_lines*, the first portion is shown with a
+    trailing summary of how many lines were omitted.
+    """
+    if print_fn is None or not function_result:
+        return False
+    try:
+        data = json.loads(function_result)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    content = data.get("content")
+    if not content or not isinstance(content, str):
+        return False
+
+    # Skip rendering for binary/image files
+    if data.get("is_binary") or data.get("is_image"):
+        return False
+
+    lines = content.splitlines()
+    total = len(lines)
+    show = lines[:max_lines]
+
+    try:
+        skin_prefix = get_skin_tool_prefix()
+        for line in show:
+            # Lines from read_file are already formatted as "NUM|CONTENT"
+            parts = line.split("|", 1)
+            if len(parts) == 2 and parts[0].strip().isdigit():
+                num = parts[0]
+                text = parts[1]
+                print_fn(f"  {skin_prefix} {_ANSI_LINE_NUM}{num}{_ANSI_RESET}|{_ANSI_DIM}{text}{_ANSI_RESET}")
+            else:
+                print_fn(f"  {skin_prefix} {_ANSI_DIM}{line}{_ANSI_RESET}")
+
+        if total > max_lines:
+            omitted = total - max_lines
+            print_fn(f"  {skin_prefix} {_ANSI_HUNK}… {omitted} more line(s) (of {total} total){_ANSI_RESET}")
+
+        return True
+    except Exception:
+        return False

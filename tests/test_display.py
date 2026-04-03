@@ -1,5 +1,6 @@
-"""Tests for agent/display.py — build_tool_preview() and inline diff previews."""
+"""Tests for agent/display.py — build_tool_preview(), inline diff previews, and read_file inline rendering."""
 
+import json
 import os
 import pytest
 from unittest.mock import MagicMock, patch
@@ -11,6 +12,7 @@ from agent.display import (
     _render_inline_unified_diff,
     _summarize_rendered_diff_sections,
     render_edit_diff_with_delta,
+    render_read_file_inline,
 )
 
 
@@ -200,3 +202,101 @@ class TestEditDiffPreview:
         assert any("a/file2.py" in line for line in rendered)
         assert not any("a/file7.py" in line for line in rendered)
         assert "additional file" in rendered[-1]
+
+
+class TestReadFileInlinePreview:
+    """Tests for render_read_file_inline — inline file content rendering."""
+
+    def _make_result(self, content="     1|hello\n     2|world", **overrides):
+        """Build a fake read_file JSON result."""
+        data = {
+            "content": content,
+            "total_lines": content.count("\n") + 1 if content else 0,
+            "file_size": len(content) if content else 0,
+            "truncated": False,
+            "is_binary": False,
+            "is_image": False,
+        }
+        data.update(overrides)
+        return json.dumps(data)
+
+    def test_renders_basic_content(self):
+        """Normal file content should be emitted with line numbers."""
+        lines = []
+        result = self._make_result()
+        ok = render_read_file_inline(result, print_fn=lines.append)
+        assert ok is True
+        assert len(lines) == 2
+        # Line numbers should be present
+        assert "1" in lines[0]
+        assert "2" in lines[1]
+
+    def test_returns_false_without_print_fn(self):
+        result = self._make_result()
+        assert render_read_file_inline(result, print_fn=None) is False
+
+    def test_returns_false_for_empty_result(self):
+        lines = []
+        assert render_read_file_inline("", print_fn=lines.append) is False
+        assert render_read_file_inline(None, print_fn=lines.append) is False
+
+    def test_returns_false_for_binary_file(self):
+        lines = []
+        result = self._make_result(is_binary=True)
+        assert render_read_file_inline(result, print_fn=lines.append) is False
+        assert len(lines) == 0
+
+    def test_returns_false_for_image_file(self):
+        lines = []
+        result = self._make_result(is_image=True)
+        assert render_read_file_inline(result, print_fn=lines.append) is False
+        assert len(lines) == 0
+
+    def test_returns_false_for_error_result(self):
+        lines = []
+        result = json.dumps({"error": "file not found"})
+        assert render_read_file_inline(result, print_fn=lines.append) is False
+
+    def test_returns_false_for_empty_content(self):
+        lines = []
+        result = self._make_result(content="")
+        assert render_read_file_inline(result, print_fn=lines.append) is False
+
+    def test_truncation_at_max_lines(self):
+        """Files exceeding max_lines should show truncation summary."""
+        content = "\n".join(f"     {i}|line {i}" for i in range(1, 101))
+        result = self._make_result(content=content)
+        lines = []
+        ok = render_read_file_inline(result, print_fn=lines.append, max_lines=10)
+        assert ok is True
+        # 10 content lines + 1 truncation summary
+        assert len(lines) == 11
+        assert "90 more line" in lines[-1]
+        assert "100 total" in lines[-1]
+
+    def test_no_truncation_when_within_limit(self):
+        """Files within max_lines should not show truncation summary."""
+        content = "\n".join(f"     {i}|line {i}" for i in range(1, 6))
+        result = self._make_result(content=content)
+        lines = []
+        ok = render_read_file_inline(result, print_fn=lines.append, max_lines=10)
+        assert ok is True
+        assert len(lines) == 5
+        # No truncation line
+        assert not any("more line" in l for l in lines)
+
+    def test_invalid_json_returns_false(self):
+        lines = []
+        assert render_read_file_inline("not json {{{", print_fn=lines.append) is False
+
+    def test_non_dict_json_returns_false(self):
+        lines = []
+        assert render_read_file_inline('"just a string"', print_fn=lines.append) is False
+
+    def test_handles_lines_without_pipe_format(self):
+        """Lines not in NUM|CONTENT format should still render."""
+        result = self._make_result(content="plain text line\nanother line")
+        lines = []
+        ok = render_read_file_inline(result, print_fn=lines.append)
+        assert ok is True
+        assert len(lines) == 2
