@@ -5905,7 +5905,43 @@ class HermesCLI:
 
         # Refresh provider credentials if needed (handles key rotation transparently)
         if not self._ensure_runtime_credentials():
-            return None
+            # Primary provider failed — walk the fallback chain before giving up.
+            # This covers fresh sessions where _init_agent() hasn't run yet and
+            # its fallback logic would never be reached.
+            activated = False
+            fb_list = getattr(self, "_fallback_model", None)
+            if fb_list and not isinstance(fb_list, list):
+                fb_list = [fb_list] if isinstance(fb_list, dict) and fb_list.get("provider") else []
+            for i, fb in enumerate(fb_list or []):
+                if not fb or not fb.get("provider") or not fb.get("model"):
+                    continue
+                try:
+                    from agent.auxiliary_client import resolve_provider_client
+                    fb_client, _ = resolve_provider_client(fb["provider"], model=fb["model"])
+                    if fb_client and getattr(fb_client, "api_key", None):
+                        self.api_key = fb_client.api_key
+                        self.base_url = str(fb_client.base_url)
+                        self.provider = fb["provider"]
+                        self.model = fb["model"]
+                        if fb["provider"] == "anthropic":
+                            self.api_mode = "anthropic_messages"
+                        elif fb["provider"] in ("openai-codex",):
+                            self.api_mode = "codex_responses"
+                        else:
+                            self.api_mode = "chat_completions"
+                        # Consume this entry so it's not retried
+                        self._fallback_model = fb_list[i + 1:]
+                        # Force agent rebuild — cached agent holds stale
+                        # provider/auth from the failed primary.
+                        self.agent = None
+                        self._active_agent_route_signature = None
+                        activated = True
+                        _cprint(f"\033[1;33m⚠️  Primary provider auth failed — falling back to {fb['model']} ({fb['provider']})\033[0m")
+                        break
+                except Exception:
+                    continue
+            if not activated:
+                return None
 
         turn_route = self._resolve_turn_agent_config(message)
         if turn_route["signature"] != self._active_agent_route_signature:
