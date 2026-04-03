@@ -373,24 +373,55 @@ def refresh_anthropic_oauth_pure(refresh_token: str, *, use_json: bool = False) 
 
 
 def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
-    """Attempt to refresh an expired Claude Code OAuth token."""
-    refresh_token = creds.get("refreshToken", "")
-    if not refresh_token:
-        logger.debug("No refresh token available — cannot refresh")
+    """Refresh an expired OAuth token by delegating to Claude Code CLI.
+
+    Instead of refreshing directly against Anthropic's token endpoint,
+    we invoke ``claude -p "." --model haiku --max-turns 1`` which triggers
+    Claude Code's internal refresh logic.  This makes Claude Code the
+    **sole token writer**, eliminating the race condition where two
+    processes compete to rotate a single-use refresh token.
+
+    After the CLI exits, we re-read ~/.claude/.credentials.json to pick
+    up the freshly-written token.
+    """
+    import shutil
+    import subprocess
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        logger.debug("Claude Code CLI not found on PATH — cannot delegate token refresh")
         return None
 
     try:
-        refreshed = refresh_anthropic_oauth_pure(refresh_token, use_json=False)
-        _write_claude_code_credentials(
-            refreshed["access_token"],
-            refreshed["refresh_token"],
-            refreshed["expires_at_ms"],
+        logger.debug("Delegating token refresh to Claude Code CLI")
+        result = subprocess.run(
+            [claude_bin, "-p", ".", "--model", "haiku", "--max-turns", "1"],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
-        logger.debug("Successfully refreshed Claude Code OAuth token")
-        return refreshed["access_token"]
+        if result.returncode != 0:
+            logger.debug(
+                "Claude Code CLI refresh exited %d: %s",
+                result.returncode,
+                (result.stderr or "")[:200],
+            )
+            # CLI may have failed but still refreshed the token as a side
+            # effect — fall through to re-read below.
+    except subprocess.TimeoutExpired:
+        logger.debug("Claude Code CLI refresh timed out (30s)")
     except Exception as e:
-        logger.debug("Failed to refresh Claude Code token: %s", e)
-        return None
+        logger.debug("Claude Code CLI refresh failed: %s", e)
+
+    # Re-read the credentials file — Claude Code should have written
+    # a fresh token regardless of whether the prompt itself succeeded.
+    fresh_creds = read_claude_code_credentials()
+    if fresh_creds and is_claude_code_token_valid(fresh_creds):
+        logger.debug("Successfully refreshed OAuth token via Claude Code CLI")
+        return fresh_creds["accessToken"]
+
+    logger.debug("Token still invalid after Claude Code CLI refresh attempt")
+    return None
 
 
 def _write_claude_code_credentials(
