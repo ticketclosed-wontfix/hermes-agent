@@ -227,7 +227,7 @@ class SignalAdapter(BasePlatformAdapter):
 
         # Health check — verify signal-cli daemon is reachable
         try:
-            resp = await self.client.get(f"{self.http_url}/api/v1/check", timeout=10.0)
+            resp = await self.client.get(f"{self.http_url}/v1/about", timeout=10.0)
             if resp.status_code != 200:
                 logger.error("Signal: health check failed (status %d)", resp.status_code)
                 return False
@@ -365,7 +365,7 @@ class SignalAdapter(BasePlatformAdapter):
                 logger.warning("Signal: SSE idle for %.0fs, checking daemon health", elapsed)
                 try:
                     resp = await self.client.get(
-                        f"{self.http_url}/api/v1/check", timeout=10.0
+                        f"{self.http_url}/v1/about", timeout=10.0
                     )
                     if resp.status_code == 200:
                         # Daemon is alive but SSE is idle — update activity to
