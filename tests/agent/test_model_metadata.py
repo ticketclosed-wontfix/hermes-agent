@@ -275,13 +275,15 @@ class TestGetModelContextLength:
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
     def test_custom_endpoint_metadata_beats_fuzzy_default(self, mock_endpoint_fetch, mock_fetch):
+        # Use a model name that won't fuzzy-match any known model in
+        # DEFAULT_CONTEXT_LENGTHS so we test pure endpoint metadata path.
         mock_fetch.return_value = {}
         mock_endpoint_fetch.return_value = {
-            "zai-org/GLM-5-TEE": {"context_length": 65536}
+            "acme-labs/novel-7b": {"context_length": 65536}
         }
 
         result = get_model_context_length(
-            "zai-org/GLM-5-TEE",
+            "acme-labs/novel-7b",
             base_url="https://llm.chutes.ai/v1",
             api_key="test-key",
         )
@@ -291,11 +293,13 @@ class TestGetModelContextLength:
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
     def test_custom_endpoint_without_metadata_skips_name_based_default(self, mock_endpoint_fetch, mock_fetch):
+        # Use a model name that won't fuzzy-match any known model so we test
+        # the fallback-to-probe-tiers path (known models get overridden).
         mock_fetch.return_value = {}
         mock_endpoint_fetch.return_value = {}
 
         result = get_model_context_length(
-            "zai-org/GLM-5-TEE",
+            "acme-labs/mystery-7b",
             base_url="https://llm.chutes.ai/v1",
             api_key="test-key",
         )
@@ -403,17 +407,18 @@ class TestStripProviderPrefix:
 
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_ollama_model_tag_not_mangled_in_context_lookup(self, mock_fetch):
-        """Ensure 'qwen3.5:27b' is NOT reduced to '27b' during context length lookup.
+        """Ensure 'mymodel:27b' is NOT reduced to '27b' during context length lookup.
 
-        We mock a custom endpoint that knows 'qwen3.5:27b' — the full name
-        must reach the endpoint metadata lookup intact.
+        We mock a custom endpoint that knows 'mymodel:27b' — the full name
+        must reach the endpoint metadata lookup intact.  Use a name that won't
+        fuzzy-match any known model in DEFAULT_CONTEXT_LENGTHS.
         """
         mock_fetch.return_value = {}
         with patch("agent.model_metadata.fetch_endpoint_model_metadata") as mock_ep, \
              patch("agent.model_metadata._is_custom_endpoint", return_value=True):
-            mock_ep.return_value = {"qwen3.5:27b": {"context_length": 32768}}
+            mock_ep.return_value = {"mymodel:27b": {"context_length": 32768}}
             result = get_model_context_length(
-                "qwen3.5:27b",
+                "mymodel:27b",
                 base_url="http://localhost:11434/v1",
             )
         assert result == 32768
