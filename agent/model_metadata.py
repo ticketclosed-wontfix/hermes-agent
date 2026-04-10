@@ -954,6 +954,14 @@ def get_model_context_length(
         if matched:
             context_length = matched.get("context_length")
             if isinstance(context_length, int):
+                # Cross-check: don't let a proxy/adapter underreport known models
+                model_lower = model.lower()
+                for default_model, default_len in sorted(
+                    DEFAULT_CONTEXT_LENGTHS.items(), key=lambda x: len(x[0]), reverse=True
+                ):
+                    if default_model in model_lower and default_len > context_length:
+                        context_length = default_len
+                        break
                 return context_length
         if not _is_known_provider_base_url(base_url):
             # 3. Try querying local server directly
