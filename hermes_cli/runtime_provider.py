@@ -268,11 +268,16 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         return None
     if not requested_norm.startswith("custom:"):
         try:
-            auth_mod.resolve_provider(requested_norm)
+            resolved = auth_mod.resolve_provider(requested_norm)
         except AuthError:
             pass
         else:
-            return None
+            # Only skip if it resolves to a real built-in provider.
+            # Names aliased to "custom" (e.g. "ollama", "lmstudio") may
+            # still have a named entry in custom_providers that should
+            # take precedence over the generic custom endpoint.
+            if resolved != "custom":
+                return None
 
     config = load_config()
     custom_providers = config.get("custom_providers")
