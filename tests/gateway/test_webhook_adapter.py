@@ -758,3 +758,67 @@ class TestDeliverCrossPlatformThreadId:
         mock_target.send.assert_awaited_once_with(
             "12345", "hello", metadata=None
         )
+
+
+class TestDeliverCrossPlatformMirror:
+    """Tests for session mirroring after cross-platform delivery."""
+
+    def _setup_adapter_with_mock_target(self, send_success=True):
+        adapter = _make_adapter()
+        mock_target = AsyncMock()
+        mock_target.send = AsyncMock(
+            return_value=SendResult(success=send_success)
+        )
+
+        mock_runner = MagicMock()
+        mock_runner.adapters = {Platform("telegram"): mock_target}
+        mock_runner.config.get_home_channel.return_value = None
+
+        adapter.gateway_runner = mock_runner
+        return adapter, mock_target
+
+    @pytest.mark.asyncio
+    async def test_mirror_called_on_success(self):
+        """Successful delivery mirrors the message to the target session."""
+        adapter, _ = self._setup_adapter_with_mock_target(send_success=True)
+        delivery = {
+            "deliver_extra": {
+                "chat_id": "-1003513821944",
+                "message_thread_id": "8",
+            }
+        }
+        with patch("gateway.platforms.webhook.mirror_to_session", create=True) as mock_mirror:
+            # Patch at call site — the import is inside the method
+            with patch("gateway.mirror.mirror_to_session") as mock_mirror2:
+                await adapter._deliver_cross_platform("telegram", "alert analysis", delivery)
+                mock_mirror2.assert_called_once_with(
+                    "telegram", "-1003513821944", "alert analysis",
+                    source_label="webhook", thread_id="8",
+                )
+
+    @pytest.mark.asyncio
+    async def test_mirror_not_called_on_failure(self):
+        """Failed delivery does NOT mirror anything."""
+        adapter, _ = self._setup_adapter_with_mock_target(send_success=False)
+        delivery = {
+            "deliver_extra": {
+                "chat_id": "-1003513821944",
+                "message_thread_id": "8",
+            }
+        }
+        with patch("gateway.mirror.mirror_to_session") as mock_mirror:
+            await adapter._deliver_cross_platform("telegram", "alert analysis", delivery)
+            mock_mirror.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mirror_failure_does_not_break_delivery(self):
+        """If mirror_to_session raises, delivery still returns success."""
+        adapter, _ = self._setup_adapter_with_mock_target(send_success=True)
+        delivery = {
+            "deliver_extra": {
+                "chat_id": "12345",
+            }
+        }
+        with patch("gateway.mirror.mirror_to_session", side_effect=Exception("db locked")):
+            result = await adapter._deliver_cross_platform("telegram", "hello", delivery)
+            assert result.success is True
