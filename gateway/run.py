@@ -7800,6 +7800,11 @@ class GatewayRunner:
                 if _plat_streaming is None
                 else bool(_plat_streaming)
             )
+            # Disable streaming for webhooks — the webhook adapter routes
+            # sends to the target platform (e.g. Telegram) and cannot edit
+            # messages, so each streamed chunk becomes a separate message.
+            if source.platform == Platform.WEBHOOK:
+                _streaming_enabled = False
             _want_stream_deltas = _streaming_enabled
             _want_interim_messages = interim_assistant_messages_enabled
             _want_interim_consumer = _want_interim_messages
