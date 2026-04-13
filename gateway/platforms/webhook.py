@@ -669,4 +669,16 @@ class WebhookAdapter(BasePlatformAdapter):
         if thread_id:
             metadata = {"thread_id": thread_id}
 
-        return await adapter.send(chat_id, content, metadata=metadata)
+        result = await adapter.send(chat_id, content, metadata=metadata)
+
+        if result.success:
+            try:
+                from gateway.mirror import mirror_to_session
+                mirror_to_session(
+                    platform_name, chat_id, content,
+                    source_label="webhook", thread_id=str(thread_id) if thread_id else None,
+                )
+            except Exception as e:
+                logger.debug("[webhook] mirror_to_session failed: %s", e)
+
+        return result
