@@ -685,6 +685,7 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
+    model: Optional[Dict[str, Any]] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -723,6 +724,12 @@ def delegate_task(
         creds = _resolve_delegation_credentials(cfg, parent_agent)
     except ValueError as exc:
         return tool_error(str(exc))
+
+    # Resolve per-call model override (top-level).  This takes priority
+    # over config.yaml delegation settings but is overridden by per-task
+    # model objects in batch mode.
+    # Priority chain: per-task > call-level > config.yaml delegation > parent
+    call_model_creds = _resolve_per_call_model(model, parent_agent)
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()
@@ -768,13 +775,26 @@ def delegate_task(
     children = []
     try:
         for i, t in enumerate(task_list):
+            # Per-task model override (highest priority in batch mode)
+            task_model_creds = _resolve_per_call_model(t.get("model"), parent_agent)
+
+            # Merge credentials: per-task > call-level > config > parent
+            effective_creds = {}
+            for key in ("model", "provider", "base_url", "api_key", "api_mode"):
+                effective_creds[key] = (
+                    task_model_creds.get(key)
+                    or call_model_creds.get(key)
+                    or creds.get(key)
+                )
+
             child = _build_child_agent(
                 task_index=i, goal=t["goal"], context=t.get("context"),
-                toolsets=t.get("toolsets") or toolsets, model=creds["model"],
+                toolsets=t.get("toolsets") or toolsets, model=effective_creds["model"],
                 max_iterations=effective_max_iter, task_count=n_tasks, parent_agent=parent_agent,
-                override_provider=creds["provider"], override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
+                override_provider=effective_creds["provider"],
+                override_base_url=effective_creds["base_url"],
+                override_api_key=effective_creds["api_key"],
+                override_api_mode=effective_creds["api_mode"],
                 override_acp_command=t.get("acp_command") or acp_command,
                 override_acp_args=t.get("acp_args") or acp_args,
             )
@@ -1031,6 +1051,66 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     }
 
 
+def _resolve_per_call_model(model_obj: Optional[Dict[str, Any]], parent_agent) -> dict:
+    """Resolve a per-call model override into full credentials.
+
+    Takes a model object ``{"model": "...", "provider": "..."}`` from the
+    delegate_task call and resolves it into a complete credential bundle
+    using the runtime provider system.
+
+    If provider is omitted, pins the current main provider from config
+    (same pattern as cron job model overrides).
+
+    Returns a dict with keys: model, provider, base_url, api_key, api_mode.
+    All values may be None if no override was requested.
+    """
+    if not model_obj or not isinstance(model_obj, dict):
+        return {"model": None, "provider": None, "base_url": None,
+                "api_key": None, "api_mode": None}
+
+    model_name = (model_obj.get("model") or "").strip() or None
+    provider_name = (model_obj.get("provider") or "").strip() or None
+
+    if not model_name and not provider_name:
+        return {"model": None, "provider": None, "base_url": None,
+                "api_key": None, "api_mode": None}
+
+    # If model given without provider, pin the current main provider
+    if model_name and not provider_name:
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            model_cfg = cfg.get("model", {})
+            if isinstance(model_cfg, dict):
+                provider_name = model_cfg.get("provider") or None
+        except Exception:
+            pass
+
+    if not provider_name:
+        # No provider to resolve — just override the model name
+        return {"model": model_name, "provider": None, "base_url": None,
+                "api_key": None, "api_mode": None}
+
+    # Resolve full credentials via the runtime provider system
+    try:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        runtime = resolve_runtime_provider(requested=provider_name)
+    except Exception as exc:
+        logger.warning("Per-call model override: cannot resolve provider '%s': %s",
+                       provider_name, exc)
+        # Fall back to just overriding model name without credentials
+        return {"model": model_name, "provider": provider_name,
+                "base_url": None, "api_key": None, "api_mode": None}
+
+    return {
+        "model": model_name or runtime.get("model"),
+        "provider": runtime.get("provider"),
+        "base_url": runtime.get("base_url"),
+        "api_key": runtime.get("api_key", ""),
+        "api_mode": runtime.get("api_mode"),
+    }
+
+
 def _load_config() -> dict:
     """Load delegation config from CLI_CONFIG or persistent config.
 
@@ -1137,6 +1217,15 @@ DELEGATE_TASK_SCHEMA = {
                             "items": {"type": "string"},
                             "description": "Per-task ACP args override.",
                         },
+                        "model": {
+                            "type": "object",
+                            "description": "Per-task model override. Takes priority over the top-level model.",
+                            "properties": {
+                                "model": {"type": "string", "description": "Model name"},
+                                "provider": {"type": "string", "description": "Provider name"},
+                            },
+                            "required": ["model"],
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -1173,6 +1262,27 @@ DELEGATE_TASK_SCHEMA = {
                     "Only used when acp_command is set. Example: ['--acp', '--stdio', '--model', 'claude-opus-4-6']"
                 ),
             },
+            "model": {
+                "type": "object",
+                "description": (
+                    "Optional per-job model override. If provider is omitted, the current main "
+                    "provider is pinned at creation time so the job stays stable."
+                ),
+                "properties": {
+                    "model": {
+                        "type": "string",
+                        "description": "Model name (e.g. 'anthropic/claude-sonnet-4', 'claude-sonnet-4')",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": (
+                            "Provider name (e.g. 'openrouter', 'anthropic'). "
+                            "Omit to use and pin the current provider."
+                        ),
+                    },
+                },
+                "required": ["model"],
+            },
         },
         "required": [],
     },
@@ -1194,6 +1304,7 @@ registry.register(
         max_iterations=args.get("max_iterations"),
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
+        model=args.get("model"),
         parent_agent=kw.get("parent_agent")),
     check_fn=check_delegate_requirements,
     emoji="🔀",
