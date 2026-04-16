@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.title_generator import (
+    _strip_preamble,
     generate_title,
     auto_title_session,
     maybe_auto_title,
@@ -158,3 +159,73 @@ class TestMaybeAutoTitle:
 
     def test_skips_if_no_session_db(self):
         maybe_auto_title(None, "sess-1", "hello", "response", [])  # no db
+
+
+class TestStripPreamble:
+    """Tests for _strip_preamble() — role-assignment stripping."""
+
+    def test_strips_runtime_role_assignment_block(self):
+        msg = (
+            "[runtime role assignment - follow this as your operating role]\n"
+            "\n"
+            "# Identity\n"
+            "\n"
+            "Nick's agent. Sharp. Opinionated.\n"
+            "\n"
+            "# Style\n"
+            "\n"
+            "- Lead with action.\n"
+            "- Strong opinions.\n"
+            "\n"
+            "What model are hermes sessions named with?"
+        )
+        result = _strip_preamble(msg)
+        assert "runtime role assignment" not in result
+        assert "What model are hermes sessions named with?" in result
+
+    def test_preserves_normal_messages(self):
+        msg = "How do I fix my Docker containers?"
+        assert _strip_preamble(msg) == msg
+
+    def test_handles_empty_string(self):
+        assert _strip_preamble("") == ""
+
+    def test_handles_only_preamble(self):
+        msg = (
+            "[runtime role assignment - follow this]\n"
+            "\n"
+            "# Identity\n"
+            "\n"
+            "Some agent config that's the whole message."
+        )
+        # Even if the whole message is preamble, should return something
+        # (may strip or not — just shouldn't crash)
+        _strip_preamble(msg)
+
+    def test_generate_title_strips_preamble(self):
+        """Integration: generate_title should strip preamble before sending to LLM."""
+        captured_kwargs = {}
+
+        def mock_call_llm(**kwargs):
+            captured_kwargs.update(kwargs)
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = "Session Naming Model Query"
+            return resp
+
+        role_msg = (
+            "[runtime role assignment - follow this as your operating role]\n"
+            "\n"
+            "# Identity\n"
+            "\n"
+            "Nick's agent.\n"
+            "\n"
+            "What model are hermes sessions named with?"
+        )
+
+        with patch("agent.title_generator.call_llm", side_effect=mock_call_llm):
+            title = generate_title(role_msg, "They use claude-haiku-4-5.")
+
+        user_content = captured_kwargs["messages"][1]["content"]
+        assert "runtime role assignment" not in user_content
+        assert title == "Session Naming Model Query"
