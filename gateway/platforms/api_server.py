@@ -2027,6 +2027,29 @@ class APIServerAdapter(BasePlatformAdapter):
                 "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                 "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
             }
+            # Auto-generate session title after first exchange (non-blocking).
+            # Mirrors the hook in gateway/run.py and cli.py so sessions created
+            # via the HTTP API (api_server / workspace / webhook) also get
+            # human-readable titles instead of falling back to "{source} session".
+            try:
+                session_db = self._ensure_session_db()
+                final_response = (
+                    result.get("final_response", "") if isinstance(result, dict) else ""
+                )
+                all_msgs = (
+                    result.get("messages", []) if isinstance(result, dict) else []
+                )
+                if session_db and session_id and final_response:
+                    from agent.title_generator import maybe_auto_title
+                    maybe_auto_title(
+                        session_db,
+                        session_id,
+                        user_message,
+                        final_response,
+                        all_msgs,
+                    )
+            except Exception:
+                pass
             return result, usage
 
         return await loop.run_in_executor(None, _run)
@@ -2196,6 +2219,26 @@ class APIServerAdapter(BasePlatformAdapter):
                         "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                         "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
                     }
+                    # Auto-generate session title after first exchange (non-blocking).
+                    try:
+                        session_db = self._ensure_session_db()
+                        final_response = (
+                            r.get("final_response", "") if isinstance(r, dict) else ""
+                        )
+                        all_msgs = (
+                            r.get("messages", []) if isinstance(r, dict) else []
+                        )
+                        if session_db and session_id and final_response:
+                            from agent.title_generator import maybe_auto_title
+                            maybe_auto_title(
+                                session_db,
+                                session_id,
+                                user_message,
+                                final_response,
+                                all_msgs,
+                            )
+                    except Exception:
+                        pass
                     return r, u
 
                 result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
