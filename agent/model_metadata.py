@@ -557,6 +557,43 @@ def fetch_endpoint_model_metadata(
                 except Exception:
                     pass
 
+            # LiteLLM exposes a non-standard /model/info endpoint that returns
+            # full metadata (including max_input_tokens) keyed by model alias.
+            # Standard /v1/models only returns bare IDs, so aliases like
+            # "hermes-primary" would otherwise fall through to the 128K default.
+            # Silently skip on 404/timeout — non-LiteLLM endpoints won't have it.
+            try:
+                info_url = candidate.rstrip("/") + "/model/info"
+                info_resp = requests.get(info_url, headers=headers, timeout=3)
+                if info_resp.ok:
+                    info_payload = info_resp.json()
+                    for entry in info_payload.get("data", []):
+                        if not isinstance(entry, dict):
+                            continue
+                        alias = entry.get("model_name")
+                        if not alias:
+                            continue
+                        merged: Dict[str, Any] = {"name": alias}
+                        context_length = _extract_context_length(entry)
+                        if context_length is not None:
+                            merged["context_length"] = context_length
+                        max_completion_tokens = _extract_max_completion_tokens(entry)
+                        if max_completion_tokens is not None:
+                            merged["max_completion_tokens"] = max_completion_tokens
+                        pricing = _extract_pricing(entry)
+                        if pricing:
+                            merged["pricing"] = pricing
+                        existing = cache.get(alias)
+                        if existing:
+                            # Prefer authoritative /model/info values but keep any
+                            # fields the /models response provided that we didn't.
+                            for key, value in merged.items():
+                                existing[key] = value
+                        else:
+                            _add_model_aliases(cache, alias, merged)
+            except Exception:
+                pass
+
             _endpoint_model_metadata_cache[normalized] = cache
             _endpoint_model_metadata_cache_time[normalized] = time.time()
             return cache

@@ -716,3 +716,173 @@ class TestContextLengthCache:
         with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
             save_context_length(model, url, 200000)
             assert get_cached_context_length(model, url) == 200000
+
+
+# =========================================================================
+# LiteLLM /v1/model/info secondary probe
+# =========================================================================
+
+class TestLiteLLMModelInfoProbe:
+    """LiteLLM exposes a non-standard /model/info endpoint keyed by model alias
+    that includes max_input_tokens. fetch_endpoint_model_metadata should probe
+    it after /v1/models and merge the richer metadata so aliases like
+    'hermes-primary' resolve to their real context length instead of 128K.
+    """
+
+    def _reset_endpoint_cache(self):
+        import agent.model_metadata as mm
+        mm._endpoint_model_metadata_cache.clear()
+        mm._endpoint_model_metadata_cache_time.clear()
+
+    def _make_response(self, ok=True, status_code=200, json_data=None, raises=False):
+        resp = MagicMock()
+        resp.ok = ok
+        resp.status_code = status_code
+        if raises:
+            resp.raise_for_status = MagicMock(side_effect=Exception(f"HTTP {status_code}"))
+        else:
+            resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value=json_data or {})
+        return resp
+
+    @patch("agent.model_metadata.requests.get")
+    def test_model_info_merges_context_length_for_alias(self, mock_get):
+        """LiteLLM /model/info provides max_input_tokens for aliases /models omits."""
+        self._reset_endpoint_cache()
+
+        # /v1/models returns only IDs (LiteLLM's standard response)
+        models_resp = self._make_response(json_data={
+            "data": [
+                {"id": "hermes-primary", "object": "model"},
+                {"id": "claude-opus-4-7", "object": "model"},
+            ]
+        })
+        # /v1/model/info returns full metadata keyed by model_name
+        info_resp = self._make_response(json_data={
+            "data": [
+                {
+                    "model_name": "hermes-primary",
+                    "model_info": {
+                        "max_input_tokens": 1000000,
+                        "max_output_tokens": 32000,
+                    },
+                    "litellm_params": {"model": "anthropic/claude-opus-4-7"},
+                },
+                {
+                    "model_name": "claude-opus-4-7",
+                    "model_info": {
+                        "max_input_tokens": 1000000,
+                        "max_output_tokens": 32000,
+                    },
+                    "litellm_params": {},
+                },
+            ]
+        })
+
+        def side_effect(url, headers=None, timeout=None):
+            if url.endswith("/models"):
+                return models_resp
+            if url.endswith("/model/info"):
+                return info_resp
+            raise AssertionError(f"unexpected URL: {url}")
+
+        mock_get.side_effect = side_effect
+
+        from agent.model_metadata import fetch_endpoint_model_metadata
+        result = fetch_endpoint_model_metadata(
+            "http://10.0.30.200:4000", api_key="sk-test", force_refresh=True,
+        )
+
+        assert "hermes-primary" in result
+        assert result["hermes-primary"]["context_length"] == 1000000
+        assert result["hermes-primary"]["max_completion_tokens"] == 32000
+        assert result["claude-opus-4-7"]["context_length"] == 1000000
+
+    @patch("agent.model_metadata.requests.get")
+    def test_model_info_404_falls_back_silently(self, mock_get):
+        """Non-LiteLLM endpoints will 404 on /model/info — don't crash or drop /models data."""
+        self._reset_endpoint_cache()
+
+        models_resp = self._make_response(json_data={
+            "data": [
+                {"id": "gpt-4o", "context_length": 128000, "object": "model"},
+            ]
+        })
+        info_resp = self._make_response(ok=False, status_code=404)
+
+        def side_effect(url, headers=None, timeout=None):
+            if url.endswith("/models"):
+                return models_resp
+            if url.endswith("/model/info"):
+                return info_resp
+            raise AssertionError(f"unexpected URL: {url}")
+
+        mock_get.side_effect = side_effect
+
+        from agent.model_metadata import fetch_endpoint_model_metadata
+        result = fetch_endpoint_model_metadata(
+            "https://api.example.com/v1", api_key="sk-test", force_refresh=True,
+        )
+
+        # /models data survives; /model/info 404 silently ignored.
+        assert "gpt-4o" in result
+        assert result["gpt-4o"]["context_length"] == 128000
+
+    @patch("agent.model_metadata.requests.get")
+    def test_model_info_timeout_falls_back_silently(self, mock_get):
+        """Timeouts/connection errors on /model/info must not kill the /models result."""
+        self._reset_endpoint_cache()
+
+        models_resp = self._make_response(json_data={
+            "data": [{"id": "some-model", "context_length": 65536}]
+        })
+
+        def side_effect(url, headers=None, timeout=None):
+            if url.endswith("/models"):
+                return models_resp
+            if url.endswith("/model/info"):
+                raise Exception("timeout")
+            raise AssertionError(f"unexpected URL: {url}")
+
+        mock_get.side_effect = side_effect
+
+        from agent.model_metadata import fetch_endpoint_model_metadata
+        result = fetch_endpoint_model_metadata(
+            "https://api.example.com/v1", api_key="", force_refresh=True,
+        )
+        assert result["some-model"]["context_length"] == 65536
+
+    @patch("agent.model_metadata.requests.get")
+    def test_get_model_context_length_uses_litellm_alias_metadata(self, mock_get):
+        """End-to-end: hermes-primary against a LiteLLM proxy resolves to 1M."""
+        self._reset_endpoint_cache()
+
+        models_resp = self._make_response(json_data={
+            "data": [{"id": "hermes-primary", "object": "model"}]
+        })
+        info_resp = self._make_response(json_data={
+            "data": [{
+                "model_name": "hermes-primary",
+                "model_info": {"max_input_tokens": 1000000, "max_output_tokens": 32000},
+                "litellm_params": {"model": "anthropic/claude-opus-4-7"},
+            }]
+        })
+
+        def side_effect(url, headers=None, timeout=None):
+            if url.endswith("/models"):
+                return models_resp
+            if url.endswith("/model/info"):
+                return info_resp
+            # Anything else (OpenRouter etc.) — return empty
+            return self._make_response(json_data={"data": []})
+
+        mock_get.side_effect = side_effect
+
+        # Skip persistent cache so lookup goes through the endpoint path.
+        with patch("agent.model_metadata.get_cached_context_length", return_value=None):
+            ctx = get_model_context_length(
+                "hermes-primary",
+                base_url="http://10.0.30.200:4000",
+                api_key="sk-test",
+            )
+        assert ctx == 1000000
