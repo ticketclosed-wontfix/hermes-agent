@@ -673,6 +673,48 @@ class TestRunJobSessionPersistence:
         assert call_args[0][1] == "cron_complete"
         fake_db.close.assert_called_once()
 
+    def test_run_job_sets_cron_session_title_without_llm(self, tmp_path):
+        """run_job should write a 'cron: <job> (<ts>)' title via maybe_auto_title
+        with explicit_title, skipping the LLM path entirely."""
+        job = {
+            "id": "nightly",
+            "name": "nightly-backup",
+            "prompt": "snapshot databases",
+        }
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "***",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls, \
+             patch("agent.title_generator.maybe_auto_title") as mock_title:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "done"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, _output, final_response, _err = run_job(job)
+
+        assert success is True
+        assert final_response == "done"
+        mock_title.assert_called_once()
+        kwargs = mock_title.call_args.kwargs
+        explicit = kwargs.get("explicit_title", "")
+        assert explicit.startswith("cron: nightly-backup (")
+        assert explicit.endswith(")")
+        # session_id (2nd positional) must match the cron-prefixed form
+        session_id_arg = mock_title.call_args.args[1]
+        assert session_id_arg.startswith("cron_nightly_")
+
     def test_run_job_empty_response_returns_empty_not_placeholder(self, tmp_path):
         """Empty final_response should stay empty for delivery logic (issue #2234).
 

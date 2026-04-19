@@ -920,6 +920,27 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # Use a separate variable for log display; keep final_response clean
         # for delivery logic (empty response = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
+
+        # Auto-title the cron session using the job name + run timestamp.
+        # Cheap path: no LLM — job name is already human-meaningful.
+        # Timestamp disambiguates repeat runs so the DB's UNIQUE title index
+        # doesn't collide (every tick of a recurring job would otherwise
+        # produce the same title).
+        if _session_db:
+            try:
+                from agent.title_generator import maybe_auto_title
+                _ts_label = _hermes_now().strftime("%m-%d %H:%M")
+                explicit = f"cron: {job_name} ({_ts_label})"
+                maybe_auto_title(
+                    _session_db,
+                    _cron_session_id,
+                    prompt,
+                    final_response,
+                    [],  # unused on explicit_title path
+                    explicit_title=explicit,
+                )
+            except Exception as e:
+                logger.debug("Job '%s': auto-title failed: %s", job_id, e)
         
         output = f"""# Cron Job: {job_name}
 
