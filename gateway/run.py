@@ -38,6 +38,33 @@ from typing import Dict, Optional, Any, List
 _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 
+
+def _derive_explicit_title_for_source(source) -> Optional[str]:
+    """Return a cheap human-readable session title for non-chat sources.
+
+    For webhook-sourced sessions, we'd rather label them ``webhook: <route>
+    (<mm-dd HH:MM>)`` than burn an LLM call summarizing a noisy JSON payload.
+    The route is extracted from ``source.chat_name`` (set by
+    WebhookAdapter.build_source as ``"webhook/<route_name>"``).  Timestamp
+    disambiguates repeat runs so the UNIQUE title index doesn't collide.
+
+    Returns None for chat-like sources (telegram/discord/slack/cli/...) so the
+    existing LLM-based title generator handles them.
+    """
+    try:
+        _plat = getattr(source, "platform", None)
+        _plat_val = getattr(_plat, "value", _plat) if _plat else ""
+        if _plat_val != "webhook":
+            return None
+        _chat_name = getattr(source, "chat_name", "") or ""
+        _route = _chat_name.split("/", 1)[1] if "/" in _chat_name else _chat_name
+        if not _route:
+            return None
+        _ts = datetime.now().strftime("%m-%d %H:%M")
+        return f"webhook: {_route} ({_ts})"
+    except Exception:
+        return None
+
 # ---------------------------------------------------------------------------
 # SSL certificate auto-detection for NixOS and other non-standard systems.
 # Must run BEFORE any HTTP library (discord, aiohttp, etc.) is imported.
@@ -9649,12 +9676,14 @@ class GatewayRunner:
                 try:
                     from agent.title_generator import maybe_auto_title
                     all_msgs = result_holder[0].get("messages", []) if result_holder[0] else []
+                    _explicit: Optional[str] = _derive_explicit_title_for_source(source)
                     maybe_auto_title(
                         self._session_db,
                         effective_session_id,
                         message,
                         final_response,
                         all_msgs,
+                        explicit_title=_explicit,
                     )
                 except Exception:
                     pass
