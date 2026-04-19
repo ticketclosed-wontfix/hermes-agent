@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -67,6 +68,17 @@ _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
 # the sentinel here is the robust fix.  See test_send_noop_* for coverage.
 NOOP_SENTINEL = "NOOP"
 _NOOP_TRAILING_RE = re.compile(r"(^|\n)\s*NOOP\s*$")
+
+# Console deliver type — POSTs structured notifications to the Hermes Console
+# ingest endpoint.  Fire-and-forget: failures log a warning but don't block
+# the LLM pipeline.
+_DEFAULT_CONSOLE_INGEST_URL = "http://127.0.0.1:3001/api/notifications/ingest"
+
+# GitHub event types that can produce console notifications
+_GITHUB_EVENT_TYPES = frozenset({
+    "pull_request", "pull_request_review", "issues",
+    "issue_comment", "check_suite", "check_run",
+})
 
 
 def check_webhook_requirements() -> bool:
@@ -418,6 +430,13 @@ class WebhookAdapter(BasePlatformAdapter):
         if deliver_type == "github_comment":
             return await self._deliver_github_comment(content, delivery)
 
+        # Console deliver type — LLM output goes to session DB only.
+        # The console notification was already sent from _handle_webhook
+        # (extracted from the raw payload, no LLM involvement).
+        if deliver_type == "console":
+            logger.info("[webhook] Console deliver — LLM output stored in session only: %s", chat_id)
+            return SendResult(success=True)
+
         # Cross-platform delivery — any platform with a gateway adapter
         if self.gateway_runner and deliver_type in (
             "telegram",
@@ -678,6 +697,14 @@ class WebhookAdapter(BasePlatformAdapter):
                 status=200,
             )
         self._seen_deliveries[delivery_id] = now
+
+        # ── Console notification (parallel lane) ──────────────────
+        # For GitHub webhooks, extract a structured notification from the
+        # raw payload and POST it to the Hermes Console ingest endpoint.
+        # This runs BEFORE/ALONGSIDE the LLM session — no LLM involvement.
+        # Fire-and-forget: failures log a warning but don't block the pipeline.
+        if event_type in _GITHUB_EVENT_TYPES:
+            self._send_console_notification(event_type, payload)
 
         # Use delivery_id in session key so concurrent webhooks on the
         # same route get independent agent runs (not queued/interrupted).
@@ -959,3 +986,96 @@ class WebhookAdapter(BasePlatformAdapter):
                 logger.debug("[webhook] mirror_to_session failed: %s", e)
 
         return result
+
+    # ------------------------------------------------------------------
+    # Console notification delivery
+    # ------------------------------------------------------------------
+
+    def _send_console_notification(self, event_type: str, payload: dict) -> None:
+        """Extract a structured notification from a GitHub webhook payload and
+        POST it to the Hermes Console ingest endpoint (fire-and-forget).
+
+        This is called from _handle_webhook for every GitHub event before
+        the LLM session starts.  It runs synchronously (the async POST is
+        scheduled as a background task) so it never blocks the webhook
+        response.
+        """
+        try:
+            from gateway.platforms.webhook_notifiers.github_notification import (
+                build_github_notification,
+            )
+        except ImportError:
+            logger.debug("[webhook] github_notification module not available")
+            return
+
+        notification = build_github_notification(event_type, payload)
+        if notification is None:
+            return  # Event type/action doesn't warrant a notification
+
+        # Schedule the async POST — don't await it
+        task = asyncio.create_task(
+            self._deliver_console(notification)
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _deliver_console(self, notification: dict) -> None:
+        """POST a notification dict to the Hermes Console ingest endpoint.
+
+        Uses aiohttp with a 5s timeout.  On failure, logs a warning but
+        returns success — notifications are fire-and-forget and must not
+        block the LLM pipeline.
+        """
+        ingest_url = os.environ.get(
+            "HERMES_CONSOLE_INGEST_URL", _DEFAULT_CONSOLE_INGEST_URL
+        )
+        ingest_secret = os.environ.get("HERMES_CONSOLE_INGEST_SECRET", "")
+
+        # Fall back to reading from config if env var is not set
+        if not ingest_secret:
+            try:
+                from hermes_constants import get_hermes_home
+                env_path = get_hermes_home() / ".env"
+                if env_path.exists():
+                    for line in env_path.read_text().splitlines():
+                        line = line.strip()
+                        if line.startswith("HERMES_CONSOLE_INGEST_SECRET="):
+                            ingest_secret = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+            except Exception:
+                pass
+
+        if not ingest_secret:
+            logger.debug("[webhook] No HERMES_CONSOLE_INGEST_SECRET set; skipping console notification")
+            return
+
+        try:
+            import aiohttp as _aiohttp
+
+            headers = {
+                "Content-Type": "application/json",
+                "X-Hermes-Ingest-Secret": ingest_secret,
+            }
+            timeout = _aiohttp.ClientTimeout(total=5)
+
+            async with _aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    ingest_url, json=notification, headers=headers
+                ) as resp:
+                    if resp.status < 400:
+                        logger.info(
+                            "[webhook] Console notification sent (status=%d kind=%s repo=%s)",
+                            resp.status,
+                            notification.get("kind", "?"),
+                            notification.get("repo", "?"),
+                        )
+                    else:
+                        body = await resp.text()
+                        logger.warning(
+                            "[webhook] Console ingest returned %d: %s",
+                            resp.status, body[:200],
+                        )
+        except Exception as e:
+            logger.warning(
+                "[webhook] Console notification POST failed (fire-and-forget): %s", e
+            )
