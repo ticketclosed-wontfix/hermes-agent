@@ -52,13 +52,180 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8644
-_INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
+_INSECURE_NO_AUTH="***"
 _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
+
+# Sentinel returned by agents to suppress outbound delivery without error.
+# When the final response trimmed equals this marker, the webhook adapter
+# logs at INFO and short-circuits send() with success=True — no delivery.
+NOOP_SENTINEL = "NOOP"
 
 
 def check_webhook_requirements() -> bool:
     """Check if webhook adapter dependencies are available."""
     return AIOHTTP_AVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Filter DSL evaluator (pre-LLM gating)
+# ---------------------------------------------------------------------------
+#
+# Per-subscription ``filter`` field lets the adapter reject non-actionable
+# webhook payloads before any agent session is spawned. Supported DSL:
+#
+#   {"any_of": [<filter>, ...]}        OR
+#   {"all_of": [<filter>, ...]}        AND
+#   {"not": <filter>}                  negation
+#   {"path": "a.b", "equals": "v"}     exact string match against payload[a][b]
+#   {"path": "a.b", "in": ["x","y"]}   value is in the given list
+#   {"path": "a.b", "regex": "pat"}    re.search match; "flags":"i" for ignore-case
+#   {"path": "a.b", "exists": true}    path resolves to a non-None value
+#   {"path": "a.b", "exists": false}   path is missing / None
+#
+# Missing paths resolve to None.  equals/in/regex against None are always
+# False.  exists:false matches missing paths.
+#
+# Evaluator is a pure function:
+#     evaluate_filter(payload: dict, spec: dict) -> (matched: bool, reason: str)
+# When ``matched`` is False, ``reason`` is a short human-readable
+# explanation; when True, reason is an empty string.
+#
+# Subscriptions without a ``filter`` field are pass-through — the evaluator
+# is only invoked when a filter is configured, so behaviour is strictly
+# backward-compatible.
+
+
+_FILTER_KEYS = {"any_of", "all_of", "not", "path"}
+
+
+def _resolve_path(payload: Any, dotted: str) -> Any:
+    """Walk ``payload`` using a ``"a.b.c"`` dotted path.  Returns None if any
+    segment is missing or a non-dict is encountered mid-walk."""
+    if not isinstance(dotted, str) or not dotted:
+        return None
+    value: Any = payload
+    for part in dotted.split("."):
+        if isinstance(value, dict):
+            value = value.get(part)
+            if value is None:
+                return None
+        else:
+            return None
+    return value
+
+
+def _regex_flags(spec_flags: Any) -> int:
+    """Translate the ``flags`` string from a regex filter into ``re`` flag
+    bits.  Currently supports 'i' (IGNORECASE), 'm' (MULTILINE), 's' (DOTALL).
+    Unknown flags are ignored silently — be permissive on config input."""
+    if not spec_flags or not isinstance(spec_flags, str):
+        return 0
+    bits = 0
+    for ch in spec_flags.lower():
+        if ch == "i":
+            bits |= re.IGNORECASE
+        elif ch == "m":
+            bits |= re.MULTILINE
+        elif ch == "s":
+            bits |= re.DOTALL
+    return bits
+
+
+def evaluate_filter(payload: Any, spec: Any) -> "tuple[bool, str]":
+    """Evaluate a filter spec against a payload.
+
+    Returns (matched, reason).  When ``matched`` is True, ``reason`` is the
+    empty string.  When False, ``reason`` is a short human-readable
+    explanation used in the filtered HTTP 202 response body.
+    """
+    # Malformed or empty spec → treat as pass-through (matched).  Consistent
+    # with "absent filter = no gating".
+    if spec is None:
+        return True, ""
+    if not isinstance(spec, dict):
+        return False, "filter spec must be an object"
+
+    # Combinators
+    if "any_of" in spec:
+        branches = spec.get("any_of") or []
+        if not isinstance(branches, list):
+            return False, "any_of must be a list"
+        if not branches:
+            # Empty any_of rejects by convention (nothing matches "no
+            # allowed branches").
+            return False, "any_of has no branches"
+        for sub in branches:
+            ok, _ = evaluate_filter(payload, sub)
+            if ok:
+                return True, ""
+        return False, "no filter branch matched"
+
+    if "all_of" in spec:
+        branches = spec.get("all_of") or []
+        if not isinstance(branches, list):
+            return False, "all_of must be a list"
+        for sub in branches:
+            ok, reason = evaluate_filter(payload, sub)
+            if not ok:
+                return False, reason
+        return True, ""
+
+    if "not" in spec:
+        inner = spec.get("not")
+        ok, _ = evaluate_filter(payload, inner)
+        if ok:
+            return False, "negated filter matched"
+        return True, ""
+
+    # Leaf predicate — must have a "path"
+    if "path" in spec:
+        path = spec.get("path")
+        value = _resolve_path(payload, path)
+
+        if "exists" in spec:
+            want = bool(spec.get("exists"))
+            present = value is not None
+            if present == want:
+                return True, ""
+            if want:
+                return False, f"path '{path}' missing"
+            return False, f"path '{path}' present but should be absent"
+
+        if "equals" in spec:
+            if value is None:
+                return False, f"path '{path}' is missing"
+            if str(value) == str(spec.get("equals")):
+                return True, ""
+            return False, f"path '{path}' != expected value"
+
+        if "in" in spec:
+            allowed = spec.get("in") or []
+            if not isinstance(allowed, list):
+                return False, "'in' must be a list"
+            if value is None:
+                return False, f"path '{path}' is missing"
+            # Compare both raw and stringified to handle numeric payload
+            # values vs string config entries.
+            if value in allowed or str(value) in [str(a) for a in allowed]:
+                return True, ""
+            return False, f"path '{path}' not in allowed values"
+
+        if "regex" in spec:
+            pattern = spec.get("regex")
+            if not isinstance(pattern, str):
+                return False, "'regex' must be a string"
+            if value is None or not isinstance(value, str):
+                return False, f"path '{path}' is missing or not a string"
+            try:
+                if re.search(pattern, value, _regex_flags(spec.get("flags"))):
+                    return True, ""
+            except re.error as exc:
+                return False, f"invalid regex on '{path}': {exc}"
+            return False, f"path '{path}' did not match regex"
+
+        return False, f"path predicate on '{path}' has no operator"
+
+    return False, "unknown filter spec (need any_of/all_of/not/path)"
 
 
 class WebhookAdapter(BasePlatformAdapter):
@@ -177,6 +344,22 @@ class WebhookAdapter(BasePlatformAdapter):
         """
         delivery = self._delivery_info.get(chat_id, {})
         deliver_type = delivery.get("deliver", "log")
+
+        # ── NOOP suppression ─────────────────────────────────────
+        # If the agent's final response is literally the NOOP sentinel
+        # (optionally with surrounding whitespace), swallow the delivery
+        # silently.  This lets prompts classify a webhook event as
+        # non-actionable (e.g. non-allow-listed commenter, wrong action)
+        # and bail without spamming the configured delivery target.
+        # Applies to every delivery type, including github_comment.
+        if content is not None and content.strip() == NOOP_SENTINEL:
+            logger.info(
+                "[webhook] Agent returned NOOP; suppressing delivery for %s "
+                "(deliver=%s)",
+                chat_id,
+                deliver_type,
+            )
+            return SendResult(success=True)
 
         if deliver_type == "log":
             logger.info("[webhook] Response for %s: %s", chat_id, content[:200])
@@ -358,6 +541,33 @@ class WebhookAdapter(BasePlatformAdapter):
             return web.json_response(
                 {"status": "ignored", "event": event_type}
             )
+
+        # ── Pre-LLM filter DSL ───────────────────────────────────
+        # If the subscription defines a ``filter`` field, evaluate it
+        # against the full payload before spawning an agent session.
+        # Rejected payloads return HTTP 202 with filtered:true and the
+        # reason the filter gave, so GitHub / the caller treat this as a
+        # successful delivery (no retry storms) but no agent runs.
+        filter_spec = route_config.get("filter")
+        if filter_spec is not None:
+            matched, reason = evaluate_filter(payload, filter_spec)
+            if not matched:
+                logger.info(
+                    "[webhook] Filtered event route=%s event=%s reason=%s",
+                    route_name,
+                    event_type,
+                    reason,
+                )
+                return web.json_response(
+                    {
+                        "status": "filtered",
+                        "filtered": True,
+                        "route": route_name,
+                        "event": event_type,
+                        "reason": reason,
+                    },
+                    status=202,
+                )
 
         # Format prompt from template
         prompt_template = route_config.get("prompt", "")
