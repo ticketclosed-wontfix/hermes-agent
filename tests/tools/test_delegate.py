@@ -1467,5 +1467,133 @@ class TestPerCallModelOverride(unittest.TestCase):
         self.assertEqual(build_kwargs["override_provider"], "anthropic")
 
 
+class TestAgentDispatcherForwardsModel(unittest.TestCase):
+    """Regression tests for run_agent.py's hand-rolled delegate_task dispatchers.
+
+    These two dispatchers previously enumerated only goal/context/toolsets/
+    tasks/max_iterations and silently dropped the per-call `model`,
+    `acp_command`, and `acp_args` tool args, causing per-call model overrides
+    to be invisible to delegate_task so the child agent fell back to the
+    parent's model.
+    """
+
+    def _make_agent(self):
+        """Build a minimal AIAgent with client/tool-loading mocked out.
+
+        Mirrors the fixture in tests/run_agent/test_run_agent.py.
+        """
+        from run_agent import AIAgent
+
+        tool_defs = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "delegate_task",
+                    "description": "delegate_task tool",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tool_defs),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+        a.client = MagicMock()
+        return a
+
+    def test_invoke_tool_forwards_model_acp_command_acp_args(self):
+        """_invoke_tool must forward model/acp_command/acp_args to delegate_task."""
+        agent = self._make_agent()
+
+        with patch("tools.delegate_tool.delegate_task", return_value="ok") as mock_delegate:
+            result = agent._invoke_tool(
+                "delegate_task",
+                {
+                    "goal": "x",
+                    "model": {"model": "glm-5.1"},
+                    "acp_command": "codex",
+                    "acp_args": ["--foo"],
+                },
+                "task-1",
+            )
+
+        self.assertEqual(result, "ok")
+        mock_delegate.assert_called_once()
+        kwargs = mock_delegate.call_args.kwargs
+        self.assertEqual(kwargs["goal"], "x")
+        self.assertEqual(kwargs["model"], {"model": "glm-5.1"})
+        self.assertEqual(kwargs["acp_command"], "codex")
+        self.assertEqual(kwargs["acp_args"], ["--foo"])
+        self.assertIs(kwargs["parent_agent"], agent)
+
+    def test_invoke_tool_forwards_missing_model_as_none(self):
+        """When tool args omit model/acp_*, dispatcher should forward None (not KeyError)."""
+        agent = self._make_agent()
+
+        with patch("tools.delegate_tool.delegate_task", return_value="ok") as mock_delegate:
+            agent._invoke_tool("delegate_task", {"goal": "x"}, "task-1")
+
+        kwargs = mock_delegate.call_args.kwargs
+        self.assertIsNone(kwargs["model"])
+        self.assertIsNone(kwargs["acp_command"])
+        self.assertIsNone(kwargs["acp_args"])
+
+    def test_run_conversation_dispatcher_forwards_model_acp_args(self):
+        """The second (inline) dispatcher inside run_conversation's tool-call loop
+        must also forward model/acp_command/acp_args.
+
+        A full run_conversation exercise is prohibitively invasive for this loop
+        (thousands of lines, many internal branches), so we verify the dispatch
+        call-site source directly. This guards against regressions where
+        someone adds a new dispatcher or reverts the forwarding kwargs without
+        also updating _invoke_tool (covered above).
+        """
+        import ast
+        import inspect
+
+        import run_agent
+
+        source = inspect.getsource(run_agent.AIAgent)
+        tree = ast.parse(source)
+
+        # Find every call to _delegate_task(...) in the AIAgent class source
+        delegate_calls = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = None
+                if isinstance(func, ast.Name):
+                    name = func.id
+                elif isinstance(func, ast.Attribute):
+                    name = func.attr
+                if name == "_delegate_task":
+                    delegate_calls.append(node)
+
+        self.assertGreaterEqual(
+            len(delegate_calls), 2,
+            "Expected at least two _delegate_task dispatch sites in AIAgent "
+            "(one in _invoke_tool, one in run_conversation's tool-call loop).",
+        )
+
+        required_kwargs = {"goal", "model", "acp_command", "acp_args", "parent_agent"}
+        for i, call in enumerate(delegate_calls):
+            kw_names = {kw.arg for kw in call.keywords if kw.arg is not None}
+            missing = required_kwargs - kw_names
+            self.assertFalse(
+                missing,
+                f"_delegate_task dispatch site #{i} is missing kwargs {missing}. "
+                f"Both hand-rolled dispatchers in run_agent.py must forward "
+                f"model/acp_command/acp_args (see fix commit for context).",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

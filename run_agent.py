@@ -7759,6 +7759,9 @@ class AIAgent:
                 toolsets=function_args.get("toolsets"),
                 tasks=function_args.get("tasks"),
                 max_iterations=function_args.get("max_iterations"),
+                model=function_args.get("model"),
+                acp_command=function_args.get("acp_command"),
+                acp_args=function_args.get("acp_args"),
                 parent_agent=self,
             )
         else:
@@ -8292,6 +8295,9 @@ class AIAgent:
                         toolsets=function_args.get("toolsets"),
                         tasks=tasks_arg,
                         max_iterations=function_args.get("max_iterations"),
+                        model=function_args.get("model"),
+                        acp_command=function_args.get("acp_command"),
+                        acp_args=function_args.get("acp_args"),
                         parent_agent=self,
                     )
                     _delegate_result = function_result
