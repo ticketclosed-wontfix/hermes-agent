@@ -905,3 +905,199 @@ async def test_handler_check_suite_with_prs_accepted():
     await _asyncio.sleep(0.05)
     adapter.handle_message.assert_called_once()
 
+
+# ---------------------------------------------------------------------------
+# Self-sender + bot-edited guards (re-entry prevention, added 2026-04-19)
+#
+# Mirrors the live `github-automation` filter in
+# ~/.hermes/webhook_subscriptions.json: the dispatch any_of is wrapped in an
+# all_of with two fail-safe gates:
+#   1. sender.login != "commit-mcgitface[bot]"   (drop our own events)
+#   2. NOT (action==edited AND sender.type==Bot) (drop dependabot body-edit churn)
+# ---------------------------------------------------------------------------
+
+GITHUB_AUTOMATION_FILTER_V2 = {
+    "all_of": [
+        {"not": {"path": "sender.login", "equals": "commit-mcgitface[bot]"}},
+        {"not": {"all_of": [
+            {"path": "action", "equals": "edited"},
+            {"path": "sender.type", "equals": "Bot"},
+        ]}},
+        {"any_of": [
+            {"all_of": [
+                {"path": "action", "in": ["labeled", "unlabeled"]},
+                {"path": "label.name", "in": ["auto", "auto-merge", "review-me"]},
+            ]},
+            {"all_of": [
+                {"path": "action", "equals": "opened"},
+                {"path": "pull_request.user.login", "in": [
+                    "dependabot[bot]", "renovate[bot]", "github-actions[bot]",
+                ]},
+            ]},
+            {"all_of": [
+                {"path": "action", "equals": "created"},
+                {"path": "comment.body", "regex": r"@commit-mcgitface\b", "flags": "i"},
+                {"path": "comment.user.login", "in": ["ticketclosed-wontfix"]},
+            ]},
+            {"all_of": [
+                {"path": "action", "equals": "completed"},
+                {"path": "check_suite.conclusion", "equals": "failure"},
+                {"path": "check_suite.pull_requests", "non_empty": True},
+            ]},
+            {"all_of": [
+                {"path": "action", "equals": "completed"},
+                {"path": "check_suite.conclusion", "equals": "success"},
+                {"path": "check_suite.pull_requests", "non_empty": True},
+            ]},
+        ]},
+    ]
+}
+
+
+def test_self_sender_guard_blocks_own_comment():
+    """Our own bot commenting must not re-trigger a session."""
+    payload = {
+        "action": "created",
+        "sender": {"login": "commit-mcgitface[bot]", "type": "Bot"},
+        "comment": {
+            "body": "Auto-merged PR #7.\n<!-- mcg:AUTO_MERGE_SUCCESS:v1 -->",
+            "user": {"login": "commit-mcgitface[bot]"},
+        },
+    }
+    ok, reason = evaluate_filter(payload, GITHUB_AUTOMATION_FILTER_V2)
+    assert ok is False
+    assert "negated" in reason  # the self-sender `not` matched
+
+
+def test_self_sender_guard_blocks_own_label_event():
+    """The post-facto BOT_PR refusal bug: a label event from our own bot
+    must not re-trigger BOT_PR's refuse logic after AUTO_MERGE already ran."""
+    payload = {
+        "action": "labeled",
+        "sender": {"login": "commit-mcgitface[bot]", "type": "Bot"},
+        "label": {"name": "auto-merge"},
+        "pull_request": {"number": 7, "user": {"login": "dependabot[bot]"}},
+    }
+    ok, _ = evaluate_filter(payload, GITHUB_AUTOMATION_FILTER_V2)
+    assert ok is False
+
+
+def test_self_sender_guard_allows_human_comment_on_bot_thread():
+    """A human replying in a thread where the bot commented previously —
+    payload sender is the human, so it passes."""
+    payload = {
+        "action": "created",
+        "sender": {"login": "ticketclosed-wontfix", "type": "User"},
+        "comment": {
+            "body": "@commit-mcgitface merge it",
+            "user": {"login": "ticketclosed-wontfix"},
+        },
+    }
+    ok, _ = evaluate_filter(payload, GITHUB_AUTOMATION_FILTER_V2)
+    assert ok is True
+
+
+def test_self_sender_guard_allows_dependabot_opened_pr():
+    """Dependabot opening a PR is the PRIMARY BOT_PR trigger — must still pass."""
+    payload = {
+        "action": "opened",
+        "sender": {"login": "dependabot[bot]", "type": "Bot"},
+        "pull_request": {"user": {"login": "dependabot[bot]"}, "number": 7},
+    }
+    ok, _ = evaluate_filter(payload, GITHUB_AUTOMATION_FILTER_V2)
+    assert ok is True
+
+
+def test_bot_edited_guard_blocks_dependabot_pr_body_edit():
+    """Dependabot rebases edit the PR body; no route handles .edited events."""
+    payload = {
+        "action": "edited",
+        "sender": {"login": "dependabot[bot]", "type": "Bot"},
+        "pull_request": {"user": {"login": "dependabot[bot]"}, "number": 7},
+    }
+    ok, _ = evaluate_filter(payload, GITHUB_AUTOMATION_FILTER_V2)
+    assert ok is False
+
+
+def test_bot_edited_guard_blocks_renovate_edit():
+    payload = {
+        "action": "edited",
+        "sender": {"login": "renovate[bot]", "type": "Bot"},
+        "pull_request": {"user": {"login": "renovate[bot]"}, "number": 8},
+    }
+    ok, _ = evaluate_filter(payload, GITHUB_AUTOMATION_FILTER_V2)
+    assert ok is False
+
+
+def test_bot_edited_guard_allows_human_edited_issue_comment():
+    """A human editing their own comment — payload action is `edited` on the
+    issue_comment resource but sender.type is User, so the bot-edit guard
+    doesn't trip. The dispatch any_of still rejects `edited` since no branch
+    handles it; this is "filtered: no branch matched", not the edit guard."""
+    payload = {
+        "action": "edited",
+        "sender": {"login": "ticketclosed-wontfix", "type": "User"},
+        "comment": {
+            "body": "@commit-mcgitface merge",
+            "user": {"login": "ticketclosed-wontfix"},
+        },
+    }
+    ok, reason = evaluate_filter(payload, GITHUB_AUTOMATION_FILTER_V2)
+    assert ok is False
+    # Proof it's the any_of failing, not the edit guard:
+    assert reason == "no filter branch matched"
+
+
+def test_self_sender_guard_missing_sender_fails_safe_open():
+    """If sender is absent (shouldn't happen in real GitHub payloads, but
+    be defensive): equals against None is False, `not` flips to True, so
+    the guard passes through. Then the any_of decides."""
+    payload = {
+        "action": "opened",
+        "pull_request": {"user": {"login": "dependabot[bot]"}, "number": 7},
+        # no sender
+    }
+    ok, _ = evaluate_filter(payload, GITHUB_AUTOMATION_FILTER_V2)
+    assert ok is True  # any_of matches the bot-opened PR branch
+
+
+def test_guards_do_not_block_check_suite_from_github():
+    """check_suite.completed events have sender=github (or the actor). Must still pass."""
+    payload = {
+        "action": "completed",
+        "sender": {"login": "github-actions[bot]", "type": "Bot"},
+        "check_suite": {
+            "conclusion": "success",
+            "pull_requests": [{"number": 42}],
+        },
+    }
+    ok, _ = evaluate_filter(payload, GITHUB_AUTOMATION_FILTER_V2)
+    assert ok is True
+
+
+def test_self_sender_guard_matches_live_config_shape():
+    """Sanity: the filter structure on disk matches the shape these tests validate."""
+    import json
+    from pathlib import Path
+    cfg = Path.home() / ".hermes" / "webhook_subscriptions.json"
+    if not cfg.exists():
+        pytest.skip("no live subscription config on this host")
+    data = json.loads(cfg.read_text())
+    live = data.get("github-automation", {}).get("filter")
+    if not live:
+        pytest.skip("no github-automation filter configured")
+    # Live filter MUST be wrapped in all_of with the self-sender guard.
+    assert "all_of" in live, "live filter must be wrapped in all_of"
+    branches = live["all_of"]
+    # Find the self-sender guard
+    found_self_guard = False
+    for b in branches:
+        if (
+            isinstance(b, dict)
+            and b.get("not", {}).get("path") == "sender.login"
+            and b.get("not", {}).get("equals") == "commit-mcgitface[bot]"
+        ):
+            found_self_guard = True
+            break
+    assert found_self_guard, "live filter missing self-sender guard"
+
