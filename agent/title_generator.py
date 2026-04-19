@@ -124,14 +124,44 @@ def maybe_auto_title(
     user_message: str,
     assistant_response: str,
     conversation_history: list,
+    explicit_title: Optional[str] = None,
 ) -> None:
     """Fire-and-forget title generation after the first exchange.
 
     Only generates a title when:
     - This appears to be the first user→assistant exchange
     - No title is already set
+
+    When ``explicit_title`` is provided, it is written directly to the
+    session row (bypassing the LLM entirely).  Callers use this to skip
+    the LLM burn when a human-meaningful label is already available —
+    e.g. cron job name, webhook route + event, telegram first line.
     """
-    if not session_db or not session_id or not user_message or not assistant_response:
+    if not session_db or not session_id:
+        return
+
+    # Fast-path: caller supplied an explicit title.  Set it directly,
+    # no LLM, no thread.  Title uniqueness is enforced at the DB layer
+    # (set_session_title handles collisions); duplicates raise and are
+    # silently swallowed.
+    if explicit_title:
+        clean = explicit_title.strip()
+        if len(clean) > 80:
+            clean = clean[:77] + "..."
+        if not clean:
+            return
+        try:
+            # Respect existing titles — do not clobber a user-set one.
+            existing = session_db.get_session_title(session_id)
+            if existing:
+                return
+            session_db.set_session_title(session_id, clean)
+            logger.debug("Set explicit session title: %s", clean)
+        except Exception as e:
+            logger.debug("Failed to set explicit session title: %s", e)
+        return
+
+    if not user_message or not assistant_response:
         return
 
     # Count user messages in history to detect first exchange.

@@ -161,6 +161,88 @@ class TestMaybeAutoTitle:
         maybe_auto_title(None, "sess-1", "hello", "response", [])  # no db
 
 
+class TestMaybeAutoTitleExplicit:
+    """Tests for the explicit_title fast-path on maybe_auto_title()."""
+
+    def test_explicit_title_sets_directly(self):
+        """When explicit_title is supplied, write it synchronously — no LLM call."""
+        db = MagicMock()
+        db.get_session_title.return_value = None
+
+        with patch("agent.title_generator.auto_title_session") as mock_auto, \
+             patch("agent.title_generator.generate_title") as mock_gen, \
+             patch("agent.title_generator.threading.Thread") as mock_thread:
+            maybe_auto_title(
+                db,
+                "sess-1",
+                "irrelevant user msg",
+                "irrelevant response",
+                [],
+                explicit_title="cron: nightly-backup (01-01 03:00)",
+            )
+
+        db.set_session_title.assert_called_once_with(
+            "sess-1", "cron: nightly-backup (01-01 03:00)"
+        )
+        mock_auto.assert_not_called()
+        mock_gen.assert_not_called()
+        mock_thread.assert_not_called()
+
+    def test_explicit_title_respects_existing(self):
+        """Explicit titles must not clobber a user-set title."""
+        db = MagicMock()
+        db.get_session_title.return_value = "User-Set Title"
+
+        maybe_auto_title(db, "sess-1", "", "", [], explicit_title="cron: x")
+
+        db.set_session_title.assert_not_called()
+
+    def test_explicit_title_truncated(self):
+        """Titles longer than 80 chars must be truncated with ellipsis."""
+        db = MagicMock()
+        db.get_session_title.return_value = None
+
+        long_title = "webhook: " + ("x" * 200)
+        maybe_auto_title(db, "sess-1", "", "", [], explicit_title=long_title)
+
+        assert db.set_session_title.call_count == 1
+        _, set_title = db.set_session_title.call_args.args
+        assert len(set_title) == 80
+        assert set_title.endswith("...")
+
+    def test_explicit_title_empty_noop(self):
+        """An empty/whitespace explicit_title should be a no-op."""
+        db = MagicMock()
+        db.get_session_title.return_value = None
+
+        maybe_auto_title(db, "sess-1", "", "", [], explicit_title="   ")
+        maybe_auto_title(db, "sess-1", "", "", [], explicit_title="")
+
+        db.set_session_title.assert_not_called()
+
+    def test_explicit_title_bypasses_first_exchange_gate(self):
+        """Explicit titles apply even for later exchanges (backfill-style use)."""
+        db = MagicMock()
+        db.get_session_title.return_value = None
+        # History with >2 user messages would normally suppress auto-title
+        history = [{"role": "user", "content": str(i)} for i in range(5)]
+
+        maybe_auto_title(
+            db, "sess-1", "x", "y", history, explicit_title="explicit-label"
+        )
+
+        db.set_session_title.assert_called_once_with("sess-1", "explicit-label")
+
+    def test_explicit_title_swallows_db_errors(self):
+        """Collision/DB errors must be swallowed silently."""
+        db = MagicMock()
+        db.get_session_title.return_value = None
+        db.set_session_title.side_effect = ValueError("collision")
+
+        # Should not raise
+        maybe_auto_title(db, "sess-1", "", "", [], explicit_title="dup-title")
+
+
 class TestStripPreamble:
     """Tests for _strip_preamble() — role-assignment stripping."""
 
