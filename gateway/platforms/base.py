@@ -700,6 +700,16 @@ class MessageEvent:
     # completion notifications) that must bypass user authorization checks.
     internal: bool = False
 
+    # Per-event model/provider override.  Mirrors the shape of
+    # ``GatewayRunner._session_model_overrides``: keys ``model``,
+    # ``provider``, ``api_key``, ``base_url``, ``api_mode``.  Currently
+    # populated by the webhook adapter so subscription JSON entries can
+    # pin a non-primary model (e.g. Sonnet for github-automation events
+    # while the global primary stays on Opus).  Consumed by
+    # ``GatewayRunner._handle_message`` which stashes it into the
+    # session-keyed override dict before the agent is built.
+    model_override: Optional[Dict[str, str]] = None
+
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
     

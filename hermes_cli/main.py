@@ -7002,6 +7002,18 @@ For more help on a command:
     wh_sub.add_argument(
         "--secret", default="", help="HMAC secret (auto-generated if omitted)"
     )
+    wh_sub.add_argument(
+        "--model",
+        default="",
+        help="Override model for this route (e.g. claude-sonnet-4-6). "
+        "Empty = inherit gateway primary.",
+    )
+    wh_sub.add_argument(
+        "--provider",
+        default="",
+        help="Override provider for --model (e.g. custom, anthropic). "
+        "Empty = inherit gateway primary.",
+    )
 
     webhook_subparsers.add_parser(
         "list", aliases=["ls"], help="List all dynamic subscriptions"

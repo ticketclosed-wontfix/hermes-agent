@@ -2901,6 +2901,24 @@ class GatewayRunner:
         # forwarded it to the user; now the user's reply goes back via
         # .update_response so the update process can continue.
         _quick_key = self._session_key_for_source(source)
+
+        # Per-event model/provider override (currently set by the webhook
+        # adapter from a route's subscription JSON).  Stash it into the
+        # session-keyed override dict so _resolve_session_agent_runtime
+        # picks it up just like a /model command would.  Bare ``model``
+        # entries (no api_key/base_url) fall through to the env/primary
+        # provider chain — so a webhook route can pin only the model
+        # name and inherit the rest of the runtime.
+        _event_model_override = getattr(event, "model_override", None)
+        if _event_model_override and _event_model_override.get("model"):
+            self._session_model_overrides[_quick_key] = dict(_event_model_override)
+            logger.info(
+                "Per-event model override applied: session=%s model=%s provider=%s",
+                _quick_key[:40],
+                _event_model_override.get("model"),
+                _event_model_override.get("provider") or "(inherit)",
+            )
+
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()

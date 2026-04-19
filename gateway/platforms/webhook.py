@@ -445,12 +445,29 @@ class WebhookAdapter(BasePlatformAdapter):
             user_id=f"webhook:{route_name}",
             user_name=route_name,
         )
+
+        # Per-route model/provider override.  Subscription JSON may pin a
+        # specific model (e.g. claude-sonnet-4-6 for github-automation
+        # while the global primary stays on Opus).  Mirrors the shape of
+        # GatewayRunner._session_model_overrides — only ``model`` is
+        # required; provider/api_key/base_url/api_mode are optional and
+        # default to whatever the resolved primary chain provides.
+        model_override: Optional[Dict[str, str]] = None
+        route_model = route_config.get("model")
+        if route_model:
+            model_override = {"model": str(route_model)}
+            for _opt in ("provider", "api_key", "base_url", "api_mode"):
+                _val = route_config.get(_opt)
+                if _val:
+                    model_override[_opt] = str(_val)
+
         event = MessageEvent(
             text=prompt,
             message_type=MessageType.TEXT,
             source=source,
             raw_message=payload,
             message_id=delivery_id,
+            model_override=model_override,
         )
 
         logger.info(

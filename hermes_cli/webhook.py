@@ -158,6 +158,16 @@ def _cmd_subscribe(args):
     if args.deliver_chat_id:
         route["deliver_extra"] = {"chat_id": args.deliver_chat_id}
 
+    # Optional per-route model/provider override.  Mirrors the
+    # session_model_overrides shape consumed by the gateway runner —
+    # bare ``model`` inherits the gateway's primary provider chain.
+    model = (getattr(args, "model", "") or "").strip()
+    if model:
+        route["model"] = model
+    provider = (getattr(args, "provider", "") or "").strip()
+    if provider:
+        route["provider"] = provider
+
     subs[name] = route
     _save_subscriptions(subs)
 
@@ -172,6 +182,10 @@ def _cmd_subscribe(args):
     else:
         print("  Events: (all)")
     print(f"  Deliver: {route['deliver']}")
+    if route.get("model"):
+        _prov = route.get("provider")
+        _model_display = route["model"] + (f" (provider={_prov})" if _prov else "")
+        print(f"  Model:   {_model_display}")
     if route.get("prompt"):
         prompt_preview = route["prompt"][:80] + ("..." if len(route["prompt"]) > 80 else "")
         print(f"  Prompt: {prompt_preview}")
@@ -199,6 +213,11 @@ def _cmd_list(args):
         print(f"    URL:     {base_url}/webhooks/{name}")
         print(f"    Events:  {events}")
         print(f"    Deliver: {deliver}")
+        _route_model = route.get("model")
+        if _route_model:
+            _route_prov = route.get("provider")
+            _md = _route_model + (f" (provider={_route_prov})" if _route_prov else "")
+            print(f"    Model:   {_md}")
         print()
 
 
