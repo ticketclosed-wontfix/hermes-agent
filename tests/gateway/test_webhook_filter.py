@@ -495,6 +495,7 @@ def _make_adapter():
 
 @pytest.mark.asyncio
 async def test_send_noop_suppresses_delivery(caplog):
+    """Bare 'NOOP' (the original sentinel) still suppresses."""
     adapter = _make_adapter()
     chat = "webhook:test:1"
     adapter._delivery_info[chat] = {
@@ -517,6 +518,60 @@ async def test_send_noop_with_whitespace_still_suppresses():
     adapter._delivery_info[chat] = {"deliver": "telegram", "deliver_extra": {}}
     result = await adapter.send(chat, "  NOOP\n")
     assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_send_explanation_then_noop_suppresses():
+    """Models routinely prepend explanation; trailing NOOP still wins."""
+    adapter = _make_adapter()
+    chat = "webhook:test:explanation"
+    adapter._delivery_info[chat] = {"deliver": "telegram", "deliver_extra": {}}
+    content = (
+        "PR #15 is open, not draft, CI passed — but no auto-merge label "
+        "and author is not a bot. AUTO_MERGE_RECHECK has nothing to act "
+        "on.\n\nNOOP"
+    )
+    result = await adapter.send(chat, content)
+    assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_send_explanation_then_noop_with_whitespace_suppresses():
+    """Trailing whitespace on the NOOP line and indentation must still match."""
+    adapter = _make_adapter()
+    chat = "webhook:test:explanation_ws"
+    adapter._delivery_info[chat] = {"deliver": "telegram", "deliver_extra": {}}
+    result = await adapter.send(chat, "explanation  \n  NOOP  \n")
+    assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_send_noop_mid_sentence_does_NOT_suppress(caplog):
+    """The literal word NOOP appearing mid-content is NOT a sentinel."""
+    adapter = _make_adapter()
+    chat = "webhook:test:mid_word"
+    adapter._delivery_info[chat] = {"deliver": "log", "deliver_extra": {}}
+    import logging
+    with caplog.at_level(logging.INFO, logger="gateway.platforms.webhook"):
+        result = await adapter.send(chat, "NOOP is the sentinel word")
+    assert result.success is True
+    # Must NOT have logged the suppression banner.
+    assert not any("suppressing delivery" in rec.message for rec in caplog.records)
+    # Should have logged the normal log-delivery line instead.
+    assert any("Response for" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_send_normal_response_does_NOT_suppress(caplog):
+    """Plain content with no NOOP at all is delivered normally."""
+    adapter = _make_adapter()
+    chat = "webhook:test:normal"
+    adapter._delivery_info[chat] = {"deliver": "log", "deliver_extra": {}}
+    import logging
+    with caplog.at_level(logging.INFO, logger="gateway.platforms.webhook"):
+        result = await adapter.send(chat, "some work done\nResult: success")
+    assert result.success is True
+    assert not any("suppressing delivery" in rec.message for rec in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -662,4 +717,191 @@ async def test_handler_without_filter_is_backward_compatible():
         assert resp.status == 202
         body = await resp.json()
         assert body.get("filtered") is not True
+
+
+# ---------------------------------------------------------------------------
+# non_empty DSL operator (added 2026-04-19 to gate check_suite by PR linkage)
+# ---------------------------------------------------------------------------
+
+def test_non_empty_true_matches_non_empty_list():
+    payload = {"check_suite": {"pull_requests": [{"number": 1}]}}
+    spec = {"path": "check_suite.pull_requests", "non_empty": True}
+    ok, _ = evaluate_filter(payload, spec)
+    assert ok is True
+
+
+def test_non_empty_true_rejects_empty_list():
+    payload = {"check_suite": {"pull_requests": []}}
+    spec = {"path": "check_suite.pull_requests", "non_empty": True}
+    ok, reason = evaluate_filter(payload, spec)
+    assert ok is False
+    assert "empty" in reason
+
+
+def test_non_empty_true_rejects_missing_path():
+    payload = {"check_suite": {}}
+    spec = {"path": "check_suite.pull_requests", "non_empty": True}
+    ok, _ = evaluate_filter(payload, spec)
+    assert ok is False
+
+
+def test_non_empty_true_matches_non_empty_string():
+    payload = {"comment": {"body": "hi"}}
+    spec = {"path": "comment.body", "non_empty": True}
+    ok, _ = evaluate_filter(payload, spec)
+    assert ok is True
+
+
+def test_non_empty_true_rejects_empty_string():
+    payload = {"comment": {"body": ""}}
+    spec = {"path": "comment.body", "non_empty": True}
+    ok, _ = evaluate_filter(payload, spec)
+    assert ok is False
+
+
+def test_non_empty_true_rejects_non_container_value():
+    """Booleans/numbers are not 'non-empty' — guard against authoring mistakes."""
+    payload = {"x": 42}
+    spec = {"path": "x", "non_empty": True}
+    ok, _ = evaluate_filter(payload, spec)
+    assert ok is False
+
+
+def test_non_empty_false_matches_empty_or_missing():
+    payload = {"check_suite": {"pull_requests": []}}
+    spec = {"path": "check_suite.pull_requests", "non_empty": False}
+    ok, _ = evaluate_filter(payload, spec)
+    assert ok is True
+
+    payload2 = {"check_suite": {}}
+    ok2, _ = evaluate_filter(payload2, spec)
+    assert ok2 is True
+
+
+def test_non_empty_combines_with_all_of_for_check_suite_gating():
+    """End-to-end DSL: only check_suite.success WITH PRs gets through."""
+    spec = {
+        "all_of": [
+            {"path": "action", "equals": "completed"},
+            {"path": "check_suite.conclusion", "equals": "success"},
+            {"path": "check_suite.pull_requests", "non_empty": True},
+        ]
+    }
+    # Payload with a PR — should match
+    matched, _ = evaluate_filter(
+        {
+            "action": "completed",
+            "check_suite": {
+                "conclusion": "success",
+                "pull_requests": [{"number": 7}],
+            },
+        },
+        spec,
+    )
+    assert matched is True
+
+    # Payload with empty PRs — should NOT match
+    rejected, reason = evaluate_filter(
+        {
+            "action": "completed",
+            "check_suite": {"conclusion": "success", "pull_requests": []},
+        },
+        spec,
+    )
+    assert rejected is False
+    assert "empty" in reason
+
+
+# ---------------------------------------------------------------------------
+# Functional: check_suite filter end-to-end through HTTP handler
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_handler_check_suite_empty_prs_filtered():
+    """check_suite.completed with empty pull_requests array → 202 filtered, no session."""
+    routes = {
+        "gh": {
+            "secret": _INSECURE_NO_AUTH,
+            "events": ["check_suite"],
+            "prompt": "x",
+            "filter": {
+                "all_of": [
+                    {"path": "action", "equals": "completed"},
+                    {"path": "check_suite.conclusion", "equals": "success"},
+                    {"path": "check_suite.pull_requests", "non_empty": True},
+                ]
+            },
+        }
+    }
+    cfg = PlatformConfig(
+        enabled=True,
+        extra={"host": "127.0.0.1", "port": 0, "routes": routes, "secret": ""},
+    )
+    adapter = WebhookAdapter(cfg)
+    adapter.handle_message = AsyncMock()
+
+    async with TestClient(TestServer(_app_for(adapter))) as cli:
+        resp = await cli.post(
+            "/webhooks/gh",
+            json={
+                "action": "completed",
+                "check_suite": {
+                    "conclusion": "success",
+                    "head_branch": "main",
+                    "pull_requests": [],
+                },
+            },
+            headers={"X-GitHub-Event": "check_suite"},
+        )
+        assert resp.status == 202
+        body = await resp.json()
+        assert body["filtered"] is True
+    adapter.handle_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handler_check_suite_with_prs_accepted():
+    """check_suite.completed WITH pull_requests array → 202 accepted, session spawned."""
+    routes = {
+        "gh": {
+            "secret": _INSECURE_NO_AUTH,
+            "events": ["check_suite"],
+            "prompt": "x",
+            "filter": {
+                "all_of": [
+                    {"path": "action", "equals": "completed"},
+                    {"path": "check_suite.conclusion", "equals": "success"},
+                    {"path": "check_suite.pull_requests", "non_empty": True},
+                ]
+            },
+        }
+    }
+    cfg = PlatformConfig(
+        enabled=True,
+        extra={"host": "127.0.0.1", "port": 0, "routes": routes, "secret": ""},
+    )
+    adapter = WebhookAdapter(cfg)
+    adapter.handle_message = AsyncMock()
+
+    async with TestClient(TestServer(_app_for(adapter))) as cli:
+        resp = await cli.post(
+            "/webhooks/gh",
+            json={
+                "action": "completed",
+                "check_suite": {
+                    "conclusion": "success",
+                    "head_branch": "fix/foo",
+                    "pull_requests": [{"number": 42, "head": {"ref": "fix/foo"}}],
+                },
+            },
+            headers={"X-GitHub-Event": "check_suite"},
+        )
+        assert resp.status == 202
+        body = await resp.json()
+        assert body.get("filtered") is not True
+        assert body["status"] == "accepted"
+
+    import asyncio as _asyncio
+    await _asyncio.sleep(0.05)
+    adapter.handle_message.assert_called_once()
 

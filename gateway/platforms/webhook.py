@@ -56,9 +56,17 @@ _INSECURE_NO_AUTH="***"
 _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
 
 # Sentinel returned by agents to suppress outbound delivery without error.
-# When the final response trimmed equals this marker, the webhook adapter
-# logs at INFO and short-circuits send() with success=True — no delivery.
+# When the final response ends with a line containing only this marker
+# (after .strip()), the webhook adapter logs at INFO and short-circuits
+# send() with success=True — no delivery.
+#
+# NOTE: We deliberately match the marker as a TRAILING line, not just
+# exact-equal to the trimmed content.  Models routinely prepend an
+# explanation before the sentinel ("PR #15 has nothing to act on.\n\nNOOP")
+# and fighting that with prompt engineering is a losing battle.  Widening
+# the sentinel here is the robust fix.  See test_send_noop_* for coverage.
 NOOP_SENTINEL = "NOOP"
+_NOOP_TRAILING_RE = re.compile(r"(^|\n)\s*NOOP\s*$")
 
 
 def check_webhook_requirements() -> bool:
@@ -81,6 +89,12 @@ def check_webhook_requirements() -> bool:
 #   {"path": "a.b", "regex": "pat"}    re.search match; "flags":"i" for ignore-case
 #   {"path": "a.b", "exists": true}    path resolves to a non-None value
 #   {"path": "a.b", "exists": false}   path is missing / None
+#   {"path": "a.b", "non_empty": true} path resolves to a non-empty
+#                                       list/string/dict (anything where
+#                                       ``len() > 0``).  False if missing,
+#                                       None, empty, or a non-sized type.
+#                                       ``non_empty: false`` matches the
+#                                       inverse — missing/empty/non-sized.
 #
 # Missing paths resolve to None.  equals/in/regex against None are always
 # False.  exists:false matches missing paths.
@@ -190,6 +204,25 @@ def evaluate_filter(payload: Any, spec: Any) -> "tuple[bool, str]":
             if want:
                 return False, f"path '{path}' missing"
             return False, f"path '{path}' present but should be absent"
+
+        if "non_empty" in spec:
+            want = bool(spec.get("non_empty"))
+            # Treat None / non-sized values as empty.  bool(0) is False,
+            # but ints aren't sized — len() raises — so we explicitly
+            # check for sized container types we care about.
+            if value is None:
+                non_empty = False
+            elif isinstance(value, (list, tuple, dict, str, set)):
+                non_empty = len(value) > 0
+            else:
+                # Booleans, numbers — "non-empty" is meaningless; treat
+                # as empty so authors can't accidentally rely on it.
+                non_empty = False
+            if non_empty == want:
+                return True, ""
+            if want:
+                return False, f"path '{path}' is empty or not a container"
+            return False, f"path '{path}' is non-empty but should be empty"
 
         if "equals" in spec:
             if value is None:
@@ -346,18 +379,35 @@ class WebhookAdapter(BasePlatformAdapter):
         deliver_type = delivery.get("deliver", "log")
 
         # ── NOOP suppression ─────────────────────────────────────
-        # If the agent's final response is literally the NOOP sentinel
-        # (optionally with surrounding whitespace), swallow the delivery
-        # silently.  This lets prompts classify a webhook event as
-        # non-actionable (e.g. non-allow-listed commenter, wrong action)
-        # and bail without spamming the configured delivery target.
-        # Applies to every delivery type, including github_comment.
-        if content is not None and content.strip() == NOOP_SENTINEL:
+        # If the agent's final response ends with a line containing only
+        # the NOOP sentinel (optionally surrounded by whitespace),
+        # swallow the delivery silently.  This lets prompts classify a
+        # webhook event as non-actionable (e.g. non-allow-listed
+        # commenter, wrong action) and bail without spamming the
+        # configured delivery target.  Applies to every delivery type,
+        # including github_comment.
+        #
+        # The match accepts trailing-line NOOP, not just exact-equal
+        # trimmed content, because models routinely prepend an
+        # explanation before the sentinel.  See _NOOP_TRAILING_RE.
+        if content is not None and _NOOP_TRAILING_RE.search(content.strip()):
+            # Log the FULL suppressed content at DEBUG and a 200-char
+            # preview at INFO so suppressed messages can be audited
+            # without spamming production logs.  Without this, the
+            # only signal that a real message got eaten by an
+            # over-eager sentinel is silence.
+            preview = content.strip().replace("\n", " ⏎ ")[:200]
             logger.info(
                 "[webhook] Agent returned NOOP; suppressing delivery for %s "
-                "(deliver=%s)",
+                "(deliver=%s) — preview=%r",
                 chat_id,
                 deliver_type,
+                preview,
+            )
+            logger.debug(
+                "[webhook] Full suppressed NOOP content for %s: %s",
+                chat_id,
+                content,
             )
             return SendResult(success=True)
 
