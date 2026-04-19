@@ -653,6 +653,7 @@ class AIAgent:
         skip_memory: bool = False,
         session_db=None,
         parent_session_id: str = None,
+        source: str = None,
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
         credential_pool=None,
@@ -716,6 +717,10 @@ class AIAgent:
         self.quiet_mode = quiet_mode
         self.ephemeral_system_prompt = ephemeral_system_prompt
         self.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
+        # Optional explicit source tag for DB rows.  Lets callers distinguish
+        # session provenance (e.g. "delegate") without changing ``platform``
+        # which is still used for delivery routing, prompt hints, etc.
+        self._source = source
         self._user_id = user_id  # Platform user identifier (gateway sessions)
         self._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
         # Pluggable print function — CLI replaces this with _cprint so that
@@ -1240,7 +1245,7 @@ class AIAgent:
             try:
                 self._session_db.create_session(
                     session_id=self.session_id,
-                    source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                    source=self._source or self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                     model=self.model,
                     model_config={
                         "max_iterations": self.max_iterations,
@@ -2593,7 +2598,7 @@ class AIAgent:
             # IGNORE so it is a no-op when the row is already there.
             self._session_db.ensure_session(
                 self.session_id,
-                source=self.platform or "cli",
+                source=self._source or self.platform or "cli",
                 model=self.model,
             )
             start_idx = len(conversation_history) if conversation_history else 0
@@ -7604,7 +7609,7 @@ class AIAgent:
                 self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
                 self._session_db.create_session(
                     session_id=self.session_id,
-                    source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                    source=self._source or self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                     model=self.model,
                     parent_session_id=old_session_id,
                 )

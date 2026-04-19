@@ -390,6 +390,10 @@ def _build_child_agent(
         ephemeral_system_prompt=child_prompt,
         log_prefix=f"[subagent-{task_index}]",
         platform=parent_agent.platform,
+        # Tag child sessions with source='delegate' so the UI (Hermes Console)
+        # can filter subagent runs out of the main chat/cron/webhook tabs.
+        # Platform stays inherited from the parent for delivery/tool-routing.
+        source="delegate",
         skip_context_files=True,
         skip_memory=True,
         clarify_callback=None,

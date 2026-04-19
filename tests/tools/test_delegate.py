@@ -234,6 +234,27 @@ class TestDelegateTask(unittest.TestCase):
             delegate_task(goal="Test tracking", parent_agent=parent)
             self.assertEqual(len(parent._active_children), 0)
 
+    def test_child_tagged_with_delegate_source(self):
+        """Child sessions should carry source='delegate' so the UI can filter them
+        out of the main CHATS/GITHUB/CRON tabs.  Parent platform is still
+        inherited (delivery/tool-routing keeps working)."""
+        parent = _make_mock_parent(depth=0)
+        parent.platform = "cli"
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1,
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="Tag me as delegate", parent_agent=parent)
+
+        _, kwargs = MockAgent.call_args
+        self.assertEqual(kwargs.get("source"), "delegate")
+        # platform stays inherited for routing
+        self.assertEqual(kwargs.get("platform"), "cli")
+
     def test_child_inherits_runtime_credentials(self):
         parent = _make_mock_parent(depth=0)
         parent.base_url = "https://chatgpt.com/backend-api/codex"
