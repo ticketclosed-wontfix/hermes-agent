@@ -1049,14 +1049,13 @@ def _launch_tui(
     if provider:
         env["HERMES_TUI_PROVIDER"] = provider
         env["HERMES_INFERENCE_PROVIDER"] = provider
-    # Guarantee an 8GB V8 heap + exposed GC for the TUI. Default node cap is
-    # ~1.5–4GB depending on version and can fatal-OOM on long sessions with
-    # large transcripts / reasoning blobs. Token-level merge: respect any
-    # user-supplied --max-old-space-size (they may have set it higher) and
-    # avoid duplicating --expose-gc.
+    # Cap node heap so a leaking TUI can't OOM the host. Long transcripts,
+    # reasoning blobs, and markdown ASTs bloat V8 old_space. 2048 MB gives
+    # the monitor ~500 MB headroom before the process crashes instead of
+    # taking out the whole machine. Respect any user override.
     _tokens = env.get("NODE_OPTIONS", "").split()
     if not any(t.startswith("--max-old-space-size=") for t in _tokens):
-        _tokens.append("--max-old-space-size=8192")
+        _tokens.append("--max-old-space-size=2048")
     if "--expose-gc" not in _tokens:
         _tokens.append("--expose-gc")
     env["NODE_OPTIONS"] = " ".join(_tokens)

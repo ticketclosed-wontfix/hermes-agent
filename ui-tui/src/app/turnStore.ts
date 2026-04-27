@@ -27,6 +27,9 @@ export const patchTurnState = (next: Partial<TurnState> | ((state: TurnState) =>
 
 export const resetTurnState = () => $turnState.set(buildTurnState())
 
+export const clearStreamSegments = () =>
+  patchTurnState(s => ({ ...s, streamSegments: [] }))
+
 export interface TurnState {
   activity: ActivityItem[]
   outcome: string

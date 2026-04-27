@@ -3,7 +3,7 @@ import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { STARTUP_RESUME_ID } from '../config/env.js'
-import { MAX_HISTORY, WHEEL_SCROLL_STEP } from '../config/limits.js'
+import { MAX_HISTORY, MAX_MSG_TEXT_CHARS, WHEEL_SCROLL_STEP } from '../config/limits.js'
 import { SECTION_NAMES, sectionMode } from '../domain/details.js'
 import { attachedImageNotice, imageTokenMeta } from '../domain/messages.js'
 import { fmtCwdBranch, shortCwd } from '../domain/paths.js'
@@ -26,7 +26,7 @@ import { createSlashHandler } from './createSlashHandler.js'
 import { type GatewayRpc, type TranscriptRow } from './interfaces.js'
 import { $overlayState, patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
-import { $turnState, patchTurnState } from './turnStore.js'
+import { $turnState, patchTurnState, resetTurnState, clearStreamSegments } from './turnStore.js'
 import { $uiState, getUiState, patchUiState } from './uiStore.js'
 import { useComposerState } from './useComposerState.js'
 import { useConfigSync } from './useConfigSync.js'
@@ -44,7 +44,15 @@ const capHistory = (items: Msg[]): Msg[] => {
     return items
   }
 
-  return items[0]?.kind === 'intro' ? [items[0]!, ...items.slice(-(MAX_HISTORY - 1))] : items.slice(-MAX_HISTORY)
+  const sliced = items[0]?.kind === 'intro'
+    ? [items[0]!, ...items.slice(-(MAX_HISTORY - 1))]
+    : items.slice(-MAX_HISTORY)
+  // Truncate long message text to prevent OOM from large transcripts
+  return sliced.map(m =>
+    m.text && m.text.length > MAX_MSG_TEXT_CHARS
+      ? { ...m, text: m.text.slice(0, MAX_MSG_TEXT_CHARS) + '\n\n… [truncated]' }
+      : m
+  )
 }
 
 const statusColorOf = (status: string, t: { dim: string; error: string; ok: string; warn: string }) => {
@@ -310,6 +318,7 @@ export function useMainApp(gw: GatewayClient) {
       setTurnStartedAt(prev => prev ?? Date.now())
     } else {
       setTurnStartedAt(null)
+      clearStreamSegments()
     }
   }, [ui.busy])
 
